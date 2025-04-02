@@ -1,9 +1,7 @@
 from flask import Flask, request
 import requests
 import feedparser
-import http.client
 import json
-from googletrans import Translator
 
 app = Flask(__name__)
 
@@ -11,8 +9,7 @@ app = Flask(__name__)
 TOKEN = "7977806496:AAHdtcgzJ5mx3sVSaGNSKL-EU9rzjEmmsrI"
 TELEGRAM_URL = f"https://api.telegram.org/bot{TOKEN}/"
 RSS_URL = "https://www.tomshardware.com/feeds/all"
-TINQ_API_KEY = "SZoacti4MjZ9OXsfSnomJwf8NRFcrShaX8bluJwb5c1de38b"  # Твой ключ от Tinq.ai
-translator = Translator()
+OPENROUTER_API_KEY = "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"
 
 # Функция отправки сообщения в Telegram
 def send_message(chat_id, text):
@@ -23,59 +20,56 @@ def send_message(chat_id, text):
     }
     requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
 
-# Функция извлечения текста статьи через Tinq.ai
-def extract_article(url):
+# Функция получения сводки через OpenRouter
+def get_article_summary(url):
     try:
-        conn = http.client.HTTPSConnection("tinq.ai")
-        payload = json.dumps({"url": url})
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {TINQ_API_KEY}"
-        }
-        conn.request("POST", "/api/v2/scraper/extract-article", payload, headers)  # Правильный эндпоинт
-        res = conn.getresponse()
-        data = res.read()
-        result = json.loads(data.decode("utf-8"))
-        if res.status == 200 and "article" in result["data"] and "article" in result["data"]["article"]:
-            return {
-                "text": result["data"]["article"]["article"],
-                "title": result["data"]["article"]["title"]
-            }
+        response = requests.post(
+            url="https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://your-site.com",  # Замени на свой сайт, если есть
+                "X-Title": "YCTNewsBot"
+            },
+            data=json.dumps({
+                "model": "deepseek/deepseek-v3-base:free",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": f"По ссылке {url} сделай краткий заголовок на русском и пересказ статьи на русском. Заголовок до 100 символов, пересказ до 3900 символов."
+                    }
+                ]
+            })
+        )
+        result = response.json()
+        if "choices" in result and len(result["choices"]) > 0:
+            content = result["choices"][0]["message"]["content"]
+            # Разделяем заголовок и пересказ (предполагаем, что модель вернёт их разделёнными переносом строки)
+            lines = content.split("\n", 1)
+            title_ru = lines[0].strip()[:100]  # Ограничиваем заголовок
+            summary_ru = lines[1].strip()[:3900] if len(lines) > 1 else "Пересказ не получен"  # Ограничиваем сводку
+            return {"title": title_ru, "summary": summary_ru}
         else:
-            return f"Ошибка API: {res.status} - {result.get('message', 'Нет текста')}"
+            return f"Ошибка API: {result.get('error', 'Нет ответа')}"
     except Exception as e:
         return f"Исключение: {str(e)}"
-
-# Функция создания динамического заголовка
-def make_dynamic_title(title_en):
-    title_ru = translator.translate(title_en, dest="ru").text
-    title_ru = title_ru.replace("рекомендуется", "нужно").replace("совместимости", "проблем").replace("«", "").replace("»", "")
-    if "BIOS" in title_ru:
-        title_ru = title_ru.replace("BIOS Update", "обновление BIOS")
-    if "Ryzen" in title_ru:
-        title_ru = f"Ryzen: {title_ru}"
-    return title_ru[:100]
 
 # Функция получения новости
 def get_latest_news():
     feed = feedparser.parse(RSS_URL)
     latest_entry = feed.entries[0]
-    title_en = latest_entry.title
     link = latest_entry.link
-    summary = latest_entry.summary if "summary" in latest_entry else "Нет описания"
     
-    # Пробуем Tinq.ai
-    article_data = extract_article(link)
+    # Получаем сводку от OpenRouter
+    summary_data = get_article_summary(link)
     
-    if isinstance(article_data, str) and ("Ошибка" in article_data or "Исключение" in article_data):
-        # Fallback на RSS + перевод
-        title_ru = make_dynamic_title(title_en)
-        summary_ru = translator.translate(summary, dest="ru").text
+    if isinstance(summary_data, str) and ("Ошибка" in summary_data or "Исключение" in summary_data):
+        # Fallback, если OpenRouter не сработал
+        title_ru = "Ошибка обработки новости"
+        summary_ru = summary_data
     else:
-        # Используем данные от Tinq.ai
-        title_ru = make_dynamic_title(article_data["title"])
-        summary_ru = article_data["text"]
+        title_ru = summary_data["title"]
+        summary_ru = summary_data["summary"]
     
     message = f"<b>{title_ru}</b>\n{summary_ru}\n<a href='{link}'>Источник</a>"
     return message
