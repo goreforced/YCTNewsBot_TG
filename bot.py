@@ -1,6 +1,6 @@
 from flask import Flask, request
-import requests
 import feedparser
+import requests
 from openai import OpenAI
 
 app = Flask(__name__)
@@ -29,9 +29,13 @@ def send_message(chat_id, text):
 # Функция получения сводки через OpenRouter
 def get_article_summary(url):
     try:
+        # Для отладки: выведем ключ и запрос
+        print(f"Using API key: {OPENROUTER_API_KEY}")
+        print(f"Requesting summary for URL: {url}")
+        
         completion = client.chat.completions.create(
             extra_headers={
-                "HTTP-Referer": "https://your-site.com",  # Замени на свой сайт, если есть
+                "HTTP-Referer": "https://your-site.com",
                 "X-Title": "YCTNewsBot"
             },
             model="deepseek/deepseek-v3-base:free",
@@ -44,7 +48,7 @@ def get_article_summary(url):
         )
         content = completion.choices[0].message.content
         lines = content.split("\n", 1)
-        title_ru = lines[0].strip()[:100]  # Ограничиваем заголовок
+        title_ru = lines[0].strip()[:100]
         summary_ru = lines[1].strip()[:3900] if len(lines) > 1 else "Пересказ не получен"
         return {"title": title_ru, "summary": summary_ru}
     except Exception as e:
