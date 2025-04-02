@@ -11,10 +11,8 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Конфигурация
-TELEGRAM_TOKEN = "7977806496:AAHdtcgzJ5mx3sVSaGNSKL-EU9rzjEmmsrI"
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/"
 RSS_FEED_URL = "https://www.tomshardware.com/feeds/all"
-OPENROUTER_API_KEY = "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"
 
 # Инициализация клиента OpenAI для работы с OpenRouter
 openrouter_client = OpenAI(
