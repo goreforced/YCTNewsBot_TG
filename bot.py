@@ -4,7 +4,8 @@ app = Flask(__name__)
 TOKEN = "7977806496:AAHdtcgzJ5mx3sVSaGNSKL-EU9rzjEmmsrI"
 TELEGRAM_URL = f"https://api.telegram.org/bot{TOKEN}/" 
 @app.route('/webhook', methods=['POST']) 
-def webhook(): update = request.get_json() 
+def webhook(): 
+    update = request.get_json() 
     chat_id = update['message']['chat']['id'] 
     text = update['message']['text'] 
 
