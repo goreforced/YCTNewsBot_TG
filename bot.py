@@ -39,7 +39,7 @@ def get_article_summary(url):
         "X-Title": "YCTNewsBot"
     }
     data = {
-        "model": "deepseek/deepseek-v3-base:free",
+        "model": "google/gemini-2.5-pro-exp-03-25:free",  # Новая модель
         "messages": [
             {
                 "role": "user",
@@ -51,7 +51,6 @@ def get_article_summary(url):
         logger.info(f"Using API key: {OPENROUTER_API_KEY[:10]}... (masked)")
         logger.info(f"Requesting summary for URL: {url}")
         
-        # Таймаут 10 секунд
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers=headers,
@@ -60,10 +59,11 @@ def get_article_summary(url):
         )
         response.raise_for_status()
         result = response.json()
-        logger.info(f"Response: {json.dumps(result, ensure_ascii=False)[:200]}...")
+        logger.info(f"Raw response: {json.dumps(result, ensure_ascii=False)}")
         
         if "choices" in result and len(result["choices"]) > 0:
             content = result["choices"][0]["message"]["content"]
+            logger.info(f"Parsed content: {content[:200]}...")
             lines = content.split("\n", 1)
             title_ru = lines[0].strip()[:100]
             summary_ru = lines[1].strip()[:3900] if len(lines) > 1 else "Пересказ не получен"
