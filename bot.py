@@ -1,6 +1,6 @@
 from flask import Flask, request
 import feedparser
-import requests  # Добавляем обратно
+import requests
 import json
 import logging
 import os
@@ -28,6 +28,47 @@ def send_message(chat_id, text):
     logger.info(f"Sending message to chat_id {chat_id}: {text[:50]}...")
     requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
 
+def get_article_title(url):
+    if not OPENROUTER_API_KEY:
+        return "Ошибка: OPENROUTER_API_KEY не задан"
+    
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://your-site.com",
+        "X-Title": "YCTNewsBot"
+    }
+    data = {
+        "model": "bytedance-research/ui-tars-72b:free",
+        "messages": [
+            {
+                "role": "user",
+                "content": f"По ссылке {url} напиши заголовок на русском (до 100 символов) с источником в конце после '|' в стиле новостного канала."
+            }
+        ]
+    }
+    try:
+        logger.info(f"Requesting title for URL: {url}")
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            data=json.dumps(data),
+            timeout=10
+        )
+        response.raise_for_status()
+        result = response.json()
+        logger.info(f"Title response: {json.dumps(result, ensure_ascii=False)}")
+        
+        if "choices" in result and len(result["choices"]) > 0:
+            return result["choices"][0]["message"]["content"].strip()[:100]
+        return "Ошибка: Нет заголовка от API"
+    except requests.exceptions.Timeout:
+        logger.error("Таймаут при запросе заголовка")
+        return "Ошибка: Таймаут заголовка"
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ошибка заголовка: {str(e)}")
+        return f"Ошибка: {str(e)}"
+
 def get_article_summary(url):
     if not OPENROUTER_API_KEY:
         return "Ошибка: OPENROUTER_API_KEY не задан в переменных окружения"
@@ -35,11 +76,11 @@ def get_article_summary(url):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://t.me/Tech_Chronicle",
-        "X-Title": "TChNewsBot"
+        "HTTP-Referer": "https://your-site.com",
+        "X-Title": "YCTNewsBot"
     }
     data = {
-        "model": "huggingfaceh4/zephyr-7b-beta:free",
+        "model": "bytedance-research/ui-tars-72b:free",
         "messages": [
             {
                 "role": "user",
@@ -62,9 +103,7 @@ def get_article_summary(url):
         ]
     }
     try:
-        logger.info(f"Using API key: {OPENROUTER_API_KEY[:10]}... (masked)")
         logger.info(f"Requesting summary for URL: {url}")
-        
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers=headers,
@@ -73,25 +112,17 @@ def get_article_summary(url):
         )
         response.raise_for_status()
         result = response.json()
-        logger.info(f"Raw response: {json.dumps(result, ensure_ascii=False)}")
+        logger.info(f"Summary response: {json.dumps(result, ensure_ascii=False)}")
         
         if "choices" in result and len(result["choices"]) > 0:
-            content = result["choices"][0]["message"]["content"]
-            logger.info(f"Parsed content: {content[:200]}...")
-            lines = content.split("\n", 1)
-            title_ru = lines[0].strip()[:100]
-            summary_ru = lines[1].strip()[:3900] if len(lines) > 1 else "Пересказ не получен"
-            return {"title": title_ru, "summary": summary_ru}
-        else:
-            return f"Ошибка API: {result.get('error', 'Нет ответа')}"
+            return result["choices"][0]["message"]["content"].strip()[:1000]
+        return "Ошибка: Нет пересказа от API"
     except requests.exceptions.Timeout:
-        error_msg = "Исключение: Таймаут при запросе к OpenRouter"
-        logger.error(error_msg)
-        return error_msg
+        logger.error("Таймаут при запросе пересказа")
+        return "Ошибка: Таймаут пересказа"
     except requests.exceptions.RequestException as e:
-        error_msg = f"Исключение: {str(e)} - Ответ сервера: {e.response.text if e.response else 'Нет ответа'}"
-        logger.error(error_msg)
-        return error_msg
+        logger.error(f"Ошибка пересказа: {str(e)}")
+        return f"Ошибка: {str(e)}"
 
 def get_latest_news():
     feed = feedparser.parse(RSS_URL)
@@ -99,16 +130,14 @@ def get_latest_news():
     link = latest_entry.link
     
     logger.info(f"Processing news from: {link}")
-    summary_data = get_article_summary(link)
+    title_ru = get_article_title(link)
+    summary_ru = get_article_summary(link)
     
-    if isinstance(summary_data, str) and ("Ошибка" in summary_data or "Исключение" in summary_data):
-        title_ru = "Ошибка обработки новости"
-        summary_ru = summary_data
+    if "Ошибка" in title_ru or "Ошибка" in summary_ru:
+        message = f"<b>{title_ru}</b>\n{summary_ru}"
     else:
-        title_ru = summary_data["title"]
-        summary_ru = summary_data["summary"]
+        message = f"<b>{title_ru}</b>\n{summary_ru}"
     
-    message = f"<b>{title_ru}</b>\n{summary_ru}"
     return message
 
 @app.route('/webhook', methods=['POST'])
