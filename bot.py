@@ -39,11 +39,11 @@ def get_article_summary(url):
         "X-Title": "YCTNewsBot"
     }
     data = {
-        "model": "google/gemini-2.5-pro-exp-03-25:free",  # Новая модель
+        "model": "google/gemini-2.5-pro-exp-03-25:free",
         "messages": [
             {
                 "role": "user",
-                "content": f"По ссылке {url} сделай краткий заголовок на русском (до 100 символов) и пересказ статьи на русском (до 3900 символов)."
+                "content": f"По ссылке {url} напиши краткий заголовок на русском (до 100 символов) и пересказ статьи на русском (до 1000 символов) в живом стиле, без слов 'статья сообщает'."
             }
         ]
     }
@@ -66,7 +66,7 @@ def get_article_summary(url):
             logger.info(f"Parsed content: {content[:200]}...")
             lines = content.split("\n", 1)
             title_ru = lines[0].strip()[:100]
-            summary_ru = lines[1].strip()[:3900] if len(lines) > 1 else "Пересказ не получен"
+            summary_ru = lines[1].strip()[:1000] if len(lines) > 1 else "Пересказ не получен"
             return {"title": title_ru, "summary": summary_ru}
         else:
             return f"Ошибка API: {result.get('error', 'Нет ответа')}"
