@@ -39,7 +39,7 @@ def get_article_summary(url):
         "X-Title": "TChNewsBot"
     }
     data = {
-        "model": "google/gemini-2.5-pro-exp-03-25:free",
+        "model": "deepseek/deepseek-v3-base:free",
         "messages": [
             {
                 "role": "user",
