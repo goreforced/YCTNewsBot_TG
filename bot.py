@@ -29,6 +29,7 @@ def send_message(chat_id, text):
     response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
     if response.status_code == 200:
         return response.json()["result"]["message_id"]
+    logger.error(f"Failed to send message: {response.text}")
     return None
 
 def edit_message(chat_id, message_id, text):
@@ -43,7 +44,9 @@ def edit_message(chat_id, message_id, text):
         "parse_mode": "HTML"
     }
     logger.info(f"Editing message {message_id} in chat {chat_id}: {text[:50]}...")
-    requests.post(f"{TELEGRAM_URL}editMessageText", json=payload)
+    response = requests.post(f"{TELEGRAM_URL}editMessageText", json=payload)
+    if response.status_code != 200:
+        logger.error(f"Failed to edit message: {response.text}")
 
 def get_article_title(url):
     if not OPENROUTER_API_KEY:
@@ -101,21 +104,7 @@ def get_article_summary(url):
         "messages": [
             {
                 "role": "user",
-                "content": f"""
-Напиши новость по ссылке {url} в следующем формате:
-
-[Первый абзац: 1-2 предложения, основная суть новости. Чётко и без воды.]
-[Второй абзац: уточняющие детали, важные цифры или контекст (если есть).]
-[Третий абзац (необязательно): краткий итог или дополнительная важная информация.]
-
-Требования:
-- Отвечай на русском языке.
-- Строго следуй формату.
-- Без аналитики, предположений, выводов, мнений.
-- Не используй вводные фразы, вроде "новые данные показывают" или "это может означать".
-- Без оформления, маркеров и списков.
-- Максимальная длина — 1000 символов.
-"""
+                "content": f"По ссылке {url} напиши пересказ новости на русском (до 1000 символов). Сделай его чётким, без лишних деталей, в формате: основная суть (1-2 предложения), ключевые факты (1-2 предложения), итог или контекст (1 предложение, если есть)."
             }
         ]
     }
@@ -157,10 +146,7 @@ def get_latest_news(chat_id):
     
     # Если заголовок ок, запрашиваем пересказ и редактируем
     summary_ru = get_article_summary(link)
-    if "Ошибка" not in summary_ru:
-        edit_message(chat_id, message_id, f"<b>{title_ru}</b>\n{summary_ru}")
-    else:
-        edit_message(chat_id, message_id, f"<b>{title_ru}</b>\n{summary_ru}")
+    edit_message(chat_id, message_id, f"<b>{title_ru}</b>\n{summary_ru}")
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
