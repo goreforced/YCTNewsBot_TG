@@ -12,8 +12,9 @@ def webhook():
     send_message(chat_id, "Привет!") 
     return "OK", 200 
 def send_message(chat_id, text): 
-    payload = { "chat_id": chat_id, 
-               "text": text 
+    payload = { 
+        "chat_id": chat_id, 
+        "text": text 
     }
   requests.post(f"{TELEGRAM_URL}sendMessage", json=payload) 
   if __name__ == "__main__": 
