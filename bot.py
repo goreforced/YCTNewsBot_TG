@@ -1,4 +1,5 @@
 from flask import Flask, request
+import requests
 import feedparser
 from openai import OpenAI
 
