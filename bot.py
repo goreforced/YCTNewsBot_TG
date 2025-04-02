@@ -18,7 +18,7 @@ RSS_URL = "https://www.tomshardware.com/feeds/all"
 def send_message(chat_id, text):
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_TOKEN не задан в переменных окружения")
-        return
+        return None
     
     payload = {
         "chat_id": chat_id,
@@ -26,7 +26,24 @@ def send_message(chat_id, text):
         "parse_mode": "HTML"
     }
     logger.info(f"Sending message to chat_id {chat_id}: {text[:50]}...")
-    requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
+    response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
+    if response.status_code == 200:
+        return response.json()["result"]["message_id"]
+    return None
+
+def edit_message(chat_id, message_id, text):
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN не задан в переменных окружения")
+        return
+    
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML"
+    }
+    logger.info(f"Editing message {message_id} in chat {chat_id}: {text[:50]}...")
+    requests.post(f"{TELEGRAM_URL}editMessageText", json=payload)
 
 def get_article_title(url):
     if not OPENROUTER_API_KEY:
@@ -115,7 +132,8 @@ def get_article_summary(url):
         logger.info(f"Summary response: {json.dumps(result, ensure_ascii=False)}")
         
         if "choices" in result and len(result["choices"]) > 0:
-            return result["choices"][0]["message"]["content"].strip()[:1000]
+            content = result["choices"][0]["message"]["content"].strip()[:1000]
+            return content if content else "Пересказ не получен"
         return "Ошибка: Нет пересказа от API"
     except requests.exceptions.Timeout:
         logger.error("Таймаут при запросе пересказа")
@@ -124,21 +142,25 @@ def get_article_summary(url):
         logger.error(f"Ошибка пересказа: {str(e)}")
         return f"Ошибка: {str(e)}"
 
-def get_latest_news():
+def get_latest_news(chat_id):
     feed = feedparser.parse(RSS_URL)
     latest_entry = feed.entries[0]
     link = latest_entry.link
     
     logger.info(f"Processing news from: {link}")
     title_ru = get_article_title(link)
+    
+    # Отправляем заголовок
+    message_id = send_message(chat_id, f"<b>{title_ru}</b>")
+    if not message_id or "Ошибка" in title_ru:
+        return
+    
+    # Если заголовок ок, запрашиваем пересказ и редактируем
     summary_ru = get_article_summary(link)
-    
-    if "Ошибка" in title_ru or "Ошибка" in summary_ru:
-        message = f"<b>{title_ru}</b>\n{summary_ru}"
+    if "Ошибка" not in summary_ru:
+        edit_message(chat_id, message_id, f"<b>{title_ru}</b>\n{summary_ru}")
     else:
-        message = f"<b>{title_ru}</b>\n{summary_ru}"
-    
-    return message
+        edit_message(chat_id, message_id, f"<b>{title_ru}</b>\n{summary_ru}")
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -146,8 +168,7 @@ def webhook():
     update = request.get_json()
     logger.info(f"Received update: {json.dumps(update, ensure_ascii=False)[:200]}...")
     chat_id = update['message']['chat']['id']
-    news_message = get_latest_news()
-    send_message(chat_id, news_message)
+    get_latest_news(chat_id)
     return "OK", 200
 
 if __name__ == "__main__":
