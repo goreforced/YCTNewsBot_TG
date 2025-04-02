@@ -7,21 +7,18 @@ import os
 
 app = Flask(__name__)
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Токен Telegram и ключ OpenRouter из переменных окружения
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/" if TELEGRAM_TOKEN else None
 RSS_URL = "https://www.tomshardware.com/feeds/all"
 
-# Функция отправки сообщения в Telegram
 def send_message(chat_id, text):
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_TOKEN не задан в переменных окружения")
-        return  # Ничего не отправляем, просто выходим
+        return
     
     payload = {
         "chat_id": chat_id,
@@ -31,7 +28,6 @@ def send_message(chat_id, text):
     logger.info(f"Sending message to chat_id {chat_id}: {text[:50]}...")
     requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
 
-# Функция получения сводки через OpenRouter
 def get_article_summary(url):
     if not OPENROUTER_API_KEY:
         return "Ошибка: OPENROUTER_API_KEY не задан в переменных окружения"
@@ -54,13 +50,13 @@ def get_article_summary(url):
     try:
         logger.info(f"Using API key: {OPENROUTER_API_KEY[:10]}... (masked)")
         logger.info(f"Requesting summary for URL: {url}")
-        logger.info(f"Headers: {headers}")
-        logger.info(f"Data: {json.dumps(data, ensure_ascii=False)}")
         
+        # Таймаут 10 секунд
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers=headers,
-            data=json.dumps(data)
+            data=json.dumps(data),
+            timeout=10
         )
         response.raise_for_status()
         result = response.json()
@@ -74,12 +70,15 @@ def get_article_summary(url):
             return {"title": title_ru, "summary": summary_ru}
         else:
             return f"Ошибка API: {result.get('error', 'Нет ответа')}"
+    except requests.exceptions.Timeout:
+        error_msg = "Исключение: Таймаут при запросе к OpenRouter"
+        logger.error(error_msg)
+        return error_msg
     except requests.exceptions.RequestException as e:
         error_msg = f"Исключение: {str(e)} - Ответ сервера: {e.response.text if e.response else 'Нет ответа'}"
         logger.error(error_msg)
         return error_msg
 
-# Функция получения новости
 def get_latest_news():
     feed = feedparser.parse(RSS_URL)
     latest_entry = feed.entries[0]
@@ -98,10 +97,11 @@ def get_latest_news():
     message = f"<b>{title_ru}</b>\n{summary_ru}\n<a href='{link}'>Источник</a>"
     return message
 
-# Webhook для обработки сообщений
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    logger.info("Webhook triggered")
     update = request.get_json()
+    logger.info(f"Received update: {json.dumps(update, ensure_ascii=False)[:200]}...")
     chat_id = update['message']['chat']['id']
     news_message = get_latest_news()
     send_message(chat_id, news_message)
