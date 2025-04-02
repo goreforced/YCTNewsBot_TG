@@ -21,20 +21,20 @@ def send_message(chat_id, text):
     }
     requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
 
-# Функция получения сводки через Tinq.ai
-def get_summary(text):
+# Функция извлечения текста статьи через Tinq.ai
+def extract_article(url):
     conn = http.client.HTTPSConnection("tinq.ai")
-    payload = json.dumps({"text": text, "sentences": 2})  # Запрашиваем 2 предложения
+    payload = json.dumps({"url": url})
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
         "Authorization": f"Bearer {TINQ_API_KEY}"
     }
-    conn.request("POST", "/api/v1/summarize", payload, headers)
+    conn.request("POST", "/api/v1/extractor", payload, headers)
     res = conn.getresponse()
     data = res.read()
-    summary = json.loads(data.decode("utf-8")).get("summary", "Ошибка суммаризации")
-    return summary
+    result = json.loads(data.decode("utf-8"))
+    return result.get("text", "Ошибка извлечения текста")
 
 # Функция получения новости
 def get_latest_news():
@@ -42,10 +42,12 @@ def get_latest_news():
     latest_entry = feed.entries[0]
     title = latest_entry.title
     link = latest_entry.link
-    summary = latest_entry.summary if "summary" in latest_entry else "Нет описания"
     
-    # Получаем сводку от Tinq.ai
-    summary_ru = get_summary(summary)
+    # Извлекаем текст статьи через Tinq.ai
+    article_text = extract_article(link)
+    
+    # Берём первые 200 символов текста как сводку (временно, без суммаризации)
+    summary_ru = article_text[:200] + "..." if article_text else "Не удалось извлечь текст"
     
     # Форматируем сообщение
     message = f"<b>{title}</b>\n{summary_ru}\n<a href='{link}'>Источник</a>"
