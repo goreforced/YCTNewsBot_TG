@@ -7,28 +7,24 @@ from googletrans import Translator
 
 app = Flask(__name__)
 
-# Токен вашего бота от BotFather
+# Твой токен от BotFather
 TOKEN = "7977806496:AAHdtcgzJ5mx3sVSaGNSKL-EU9rzjEmmsrI"
 TELEGRAM_URL = f"https://api.telegram.org/bot{TOKEN}/"
 RSS_URL = "https://www.tomshardware.com/feeds/all"
-TINQ_API_KEY = "SZoacti4MjZ9OXsfSnomJwf8NRFcrShaX8bluJwb5c1de38b"
+TINQ_API_KEY = "SZoacti4MjZ9OXsfSnomJwf8NRFcrShaX8bluJwb5c1de38b"  # Твой ключ от Tinq.ai
 translator = Translator()
 
-# Максимальная длина сообщения в Telegram
-MAX_MESSAGE_LENGTH = 4096
-
+# Функция отправки сообщения в Telegram
 def send_message(chat_id, text):
-    """Отправляет сообщение в Telegram, разбивая его на части, если оно превышает лимит."""
-    for chunk in split_text(text, MAX_MESSAGE_LENGTH):
-        payload = {
-            "chat_id": chat_id,
-            "text": chunk,
-            "parse_mode": "HTML"
-        }
-        requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML"
+    }
+    requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
 
+# Функция извлечения текста статьи через Tinq.ai
 def extract_article(url):
-    """Извлекает полный текст статьи по URL с помощью Tinq.ai."""
     try:
         conn = http.client.HTTPSConnection("tinq.ai")
         payload = json.dumps({"url": url})
@@ -41,65 +37,57 @@ def extract_article(url):
         res = conn.getresponse()
         data = res.read()
         result = json.loads(data.decode("utf-8"))
-        if res.status == 200 and "text" in result:
-            return result["text"]
+        if res.status == 200 and "article" in result["data"] and "article" in result["data"]["article"]:
+            return {
+                "text": result["data"]["article"]["article"],
+                "title": result["data"]["article"]["title"]
+            }
         else:
             return f"Ошибка API: {res.status} - {result.get('message', 'Нет текста')}"
     except Exception as e:
         return f"Исключение: {str(e)}"
 
-def summarize_text(text):
-    """Создает сводку текста с помощью Tinq.ai."""
-    try:
-        conn = http.client.HTTPSConnection("tinq.ai")
-        payload = json.dumps({"text": text})
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {TINQ_API_KEY}"
-        }
-        conn.request("POST", "/api/v1/summarize", payload, headers)
-        res = conn.getresponse()
-        data = res.read()
-        result = json.loads(data.decode("utf-8"))
-        if res.status == 200 and "summary" in result:
-            return result["summary"]
-        else:
-            return f"Ошибка API: {res.status} - {result.get('message', 'Нет сводки')}"
-    except Exception as e:
-        return f"Исключение: {str(e)}"
+# Функция создания динамического заголовка
+def make_dynamic_title(title_en):
+    # Переводим заголовок на русский
+    title_ru = translator.translate(title_en, dest="ru").text
+    
+    # Сокращаем и перефразируем
+    if "exclusive" in title_en.lower():
+        title_ru = title_ru.replace("эксклюзивы для Amazon Prime", "только для Prime")
+    if "scalpers" in title_en.lower():
+        title_ru += ", что бесит перекупщиков"
+    if "RTX" in title_en or "RX" in title_en:
+        title_ru = title_ru.replace("графические процессоры", "видеокарты")
+    
+    return title_ru[:100]  # Ограничиваем до 100 символов
 
+# Функция получения новости
 def get_latest_news():
-    """Получает последнюю новость из RSS, извлекает и суммирует текст, переводит на русский."""
     feed = feedparser.parse(RSS_URL)
     latest_entry = feed.entries[0]
-    title = latest_entry.title
+    title_en = latest_entry.title  # Оригинальный заголовок из RSS
     link = latest_entry.link
-
-    # Извлекаем полный текст статьи
-    full_text = extract_article(link)
+    summary = latest_entry.summary if "summary" in latest_entry else "Нет описания"
     
-    # Если извлечение не удалось, используем summary из RSS
-    if "Ошибка" in full_text or "Исключение" in full_text:
-        summary = latest_entry.summary if "summary" in latest_entry else "Нет описания"
+    # Пробуем извлечь текст статьи
+    article_data = extract_article(link)
+    
+    # Если ошибка, берём summary из RSS и переводим
+    if isinstance(article_data, str) and ("Ошибка" in article_data or "Исключение" in article_data):
+        summary_ru = translator.translate(summary, dest="ru").text
+        title_ru = make_dynamic_title(title_en)
     else:
-        summary = summarize_text(full_text)
+        summary_ru = article_data["text"]  # Полный текст статьи
+        title_ru = make_dynamic_title(article_data["title"])  # Заголовок из Tinq.ai
     
-    # Переводим сводку на русский
-    summary_ru = translator.translate(summary, dest="ru").text
-
-    # Формируем сообщение
-    message = f"<b>{title}</b>\n{summary_ru}\n<a href='{link}'>Источник</a>"
+    # Форматируем сообщение
+    message = f"<b>{title_ru}</b>\n{summary_ru}\n<a href='{link}'>Источник</a>"
     return message
 
-def split_text(text, max_length):
-    """Разбивает текст на части, не превышающие max_length символов."""
-    for i in range(0, len(text), max_length):
-        yield text[i:i + max_length]
-
+# Webhook для обработки сообщений
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Обрабатывает входящие сообщения от Telegram."""
     update = request.get_json()
     chat_id = update['message']['chat']['id']
     news_message = get_latest_news()
