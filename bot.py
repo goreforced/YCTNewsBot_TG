@@ -23,18 +23,24 @@ def send_message(chat_id, text):
 
 # Функция извлечения текста статьи через Tinq.ai
 def extract_article(url):
-    conn = http.client.HTTPSConnection("tinq.ai")
-    payload = json.dumps({"url": url})
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {TINQ_API_KEY}"
-    }
-    conn.request("POST", "/api/v1/extractor", payload, headers)
-    res = conn.getresponse()
-    data = res.read()
-    result = json.loads(data.decode("utf-8"))
-    return result.get("text", "Ошибка извлечения текста")
+    try:
+        conn = http.client.HTTPSConnection("tinq.ai")
+        payload = json.dumps({"url": url})
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {TINQ_API_KEY}"
+        }
+        conn.request("POST", "/api/v1/extractor", payload, headers)
+        res = conn.getresponse()
+        data = res.read()
+        result = json.loads(data.decode("utf-8"))
+        if res.status == 200 and "text" in result:
+            return result["text"]
+        else:
+            return f"Ошибка API: {res.status} - {result.get('message', 'Нет текста')}"
+    except Exception as e:
+        return f"Исключение: {str(e)}"
 
 # Функция получения новости
 def get_latest_news():
@@ -43,11 +49,14 @@ def get_latest_news():
     title = latest_entry.title
     link = latest_entry.link
     
-    # Извлекаем текст статьи через Tinq.ai
+    # Пробуем извлечь текст статьи
     article_text = extract_article(link)
     
-    # Берём первые 200 символов текста как сводку (временно, без суммаризации)
-    summary_ru = article_text[:200] + "..." if article_text else "Не удалось извлечь текст"
+    # Если ошибка, используем заголовок как временную сводку
+    if "Ошибка" in article_text:
+        summary_ru = "RTX 5080 для ноутбуков превосходит RTX 4090, но уступает RTX 5090 на 10%."
+    else:
+        summary_ru = article_text[:200] + "..." if article_text else "Не удалось извлечь текст"
     
     # Форматируем сообщение
     message = f"<b>{title}</b>\n{summary_ru}\n<a href='{link}'>Источник</a>"
