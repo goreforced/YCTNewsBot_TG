@@ -39,7 +39,7 @@ def get_article_summary(url):
         "X-Title": "TChNewsBot"
     }
     data = {
-        "model": "deepseek/deepseek-v3-base:free",
+        "model": "microsoft/phi-3-medium-128k-instruct:free",
         "messages": [
             {
                 "role": "user",
