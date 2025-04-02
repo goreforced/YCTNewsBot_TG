@@ -3,6 +3,7 @@ import requests
 import feedparser
 import http.client
 import json
+from googletrans import Translator
 
 app = Flask(__name__)
 
@@ -11,6 +12,7 @@ TOKEN = "7977806496:AAHdtcgzJ5mx3sVSaGNSKL-EU9rzjEmmsrI"
 TELEGRAM_URL = f"https://api.telegram.org/bot{TOKEN}/"
 RSS_URL = "https://www.tomshardware.com/feeds/all"
 TINQ_API_KEY = "SZoacti4MjZ9OXsfSnomJwf8NRFcrShaX8bluJwb5c1de38b"  # Твой ключ от Tinq.ai
+translator = Translator()
 
 # Функция отправки сообщения в Telegram
 def send_message(chat_id, text):
@@ -36,7 +38,7 @@ def extract_article(url):
         data = res.read()
         result = json.loads(data.decode("utf-8"))
         if res.status == 200 and "text" in result:
-            return result["text"]
+            return result["text"][:200] + "..."  # Обрезаем до 200 символов
         else:
             return f"Ошибка API: {res.status} - {result.get('message', 'Нет текста')}"
     except Exception as e:
@@ -52,11 +54,12 @@ def get_latest_news():
     # Пробуем извлечь текст статьи
     article_text = extract_article(link)
     
-    # Если ошибка, используем заголовок как временную сводку
-    if "Ошибка" in article_text:
-        summary_ru = "RTX 5080 для ноутбуков превосходит RTX 4090, но уступает RTX 5090 на 10%."
+    # Если ошибка, берём summary из RSS и переводим
+    if "Ошибка" in article_text or "Исключение" in article_text:
+        summary = latest_entry.summary if "summary" in latest_entry else "Нет описания"
+        summary_ru = translator.translate(summary, dest="ru").text[:200] + "..."
     else:
-        summary_ru = article_text[:200] + "..." if article_text else "Не удалось извлечь текст"
+        summary_ru = article_text
     
     # Форматируем сообщение
     message = f"<b>{title}</b>\n{summary_ru}\n<a href='{link}'>Источник</a>"
