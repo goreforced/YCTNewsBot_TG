@@ -39,7 +39,7 @@ def get_article_summary(url):
         "X-Title": "TChNewsBot"
     }
     data = {
-        "model": "microsoft/phi-3-medium-128k-instruct:free",
+        "model": "huggingfaceh4/zephyr-7b-beta:free",
         "messages": [
             {
                 "role": "user",
