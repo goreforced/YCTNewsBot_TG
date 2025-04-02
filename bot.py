@@ -59,7 +59,7 @@ def get_article_title(url):
         "X-Title": "YCTNewsBot"
     }
     data = {
-        "model": "bytedance-research/ui-tars-72b:free",
+        "model": "deepseek/deepseek-v3-base:free",
         "messages": [
             {
                 "role": "user",
@@ -100,11 +100,11 @@ def get_article_summary(url):
         "X-Title": "YCTNewsBot"
     }
     data = {
-        "model": "bytedance-research/ui-tars-72b:free",
+        "model": "deepseek/deepseek-v3-base:free",
         "messages": [
             {
                 "role": "user",
-                "content": f"По ссылке {url} напиши пересказ новости на русском (до 1000 символов). Сделай его чётким, без лишних деталей, в формате: основная суть (1-2 предложения), ключевые факты (1-2 предложения), итог или контекст (1 предложение, если есть)."
+                "content": f"По ссылке {url} напиши пересказ новости на русском (до 1000 символов). Делай его чётким и простым: основная суть (1-2 предложения), ключевые факты (1-2 предложения), итог или контекст (1 предложение, если есть)."
             }
         ]
     }
