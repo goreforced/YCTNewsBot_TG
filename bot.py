@@ -55,11 +55,11 @@ def get_article_title(url):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://your-site.com",
-        "X-Title": "YCTNewsBot"
+        "HTTP-Referer": "https://t.me/Tech_Chronicle",
+        "X-Title": "TChNewsBot"
     }
     data = {
-        "model": "deepseek/deepseek-v3-base:free",
+        "model": "nousresearch/deephermes-3-llama-3-8b-preview:free",
         "messages": [
             {
                 "role": "user",
@@ -96,11 +96,11 @@ def get_article_summary(url):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://your-site.com",
-        "X-Title": "YCTNewsBot"
+        "HTTP-Referer": "https://t.me/Tech_Chronicle",
+        "X-Title": "TChNewsBot"
     }
     data = {
-        "model": "deepseek/deepseek-v3-base:free",
+        "model": "nousresearch/deephermes-3-llama-3-8b-preview:free",
         "messages": [
             {
                 "role": "user",
