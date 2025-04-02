@@ -47,7 +47,7 @@ def get_article_content(url):
                 "role": "user",
                 "content": f"""
 По ссылке {url} напиши новость на русском в следующем формате:
-Заголовок (до 100 символов) в стиле новостного канала.
+Только заголовок (до 80 символов) в стиле новостного канала, без слова "Заголовок".
 [Первый абзац: 1-2 предложения, основная суть новости. Чётко и без воды.]
 [Второй абзац: уточняющие детали, важные цифры или контекст (если есть).]
 [Третий абзац (необязательно): краткий итог или дополнительная важная информация.]
@@ -55,6 +55,7 @@ def get_article_content(url):
 Требования:
 - Отвечай на русском языке.
 - Строго следуй формату.
+- Без выдумок, используй только данные из статьи.
 - Без аналитики, предположений, выводов, мнений.
 - Не используй вводные фразы, вроде "новые данные показывают".
 - Без оформления, маркеров и списков.
@@ -80,8 +81,8 @@ def get_article_content(url):
             content = result["choices"][0]["message"]["content"].strip()
             if "\n" in content:
                 title, summary = content.split("\n", 1)
-                return title.strip()[:100], summary.strip()[:1000]
-            return content[:100], "Пересказ не получен"
+                return title.strip()[:80], summary.strip()[:1000]
+            return content[:80], "Пересказ не получен"
         return "Ошибка: Нет ответа от API", "Ошибка: Нет ответа от API"
     except requests.exceptions.Timeout:
         logger.error("Таймаут при запросе")
@@ -97,7 +98,7 @@ def get_latest_news(chat_id):
     
     logger.info(f"Processing news from: {link}")
     title_ru, summary_ru = get_article_content(link)
-    full_title = f"{title_ru[:100]} <a href='{link}'>Источник</a>"  # Обрезаем до 100, потом добавляем ссылку
+    full_title = f"{title_ru[:80]} <a href='{link}'>Источник</a>"
     message = f"<b>{full_title}</b>\n{summary_ru}"
     
     send_message(chat_id, message)
