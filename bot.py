@@ -33,7 +33,7 @@ def extract_article(url):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {TINQ_API_KEY}"
         }
-        conn.request("POST", "/api/v1/scraper/article", payload, headers)  # Правильный эндпоинт
+        conn.request("POST", "/api/v2/scraper/extract-article", payload, headers)  # Правильный эндпоинт
         res = conn.getresponse()
         data = res.read()
         result = json.loads(data.decode("utf-8"))
