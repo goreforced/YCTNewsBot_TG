@@ -25,8 +25,6 @@ def get_article_summary(url):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://your-site.com",  # Замени на свой сайт, если есть
-        "X-Title": "YCTNewsBot"
     }
     data = {
         "model": "deepseek/deepseek-v3-base:free",
