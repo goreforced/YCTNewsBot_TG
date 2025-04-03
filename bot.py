@@ -4,6 +4,8 @@ import requests
 import json
 import logging
 import os
+import hashlib
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -14,6 +16,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/" if TELEGRAM_TOKEN else None
+FEEDCACHE_FILE = "feedcache.json"
 
 RSS_URLS = [
     "https://www.theverge.com/rss/index.xml",
@@ -44,6 +47,18 @@ def send_message(chat_id, text):
     response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
     if response.status_code != 200:
         logger.error(f"Failed to send message: {response.text}")
+
+def send_file(chat_id, file_path):
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN не задан в переменных окружения")
+        return
+    
+    with open(file_path, 'rb') as f:
+        files = {'document': (file_path, f)}
+        payload = {"chat_id": chat_id}
+        response = requests.post(f"{TELEGRAM_URL}sendDocument", data=payload, files=files)
+    if response.status_code != 200:
+        logger.error(f"Failed to send file: {response.text}")
 
 def get_article_content(url):
     if not OPENROUTER_API_KEY:
@@ -101,6 +116,30 @@ def get_article_content(url):
         logger.error(f"Ошибка запроса: {str(e)}")
         return f"Ошибка: {str(e)}", f"Ошибка: {str(e)}"
 
+def save_to_feedcache(title, summary, link, source):
+    entry = {
+        "id": hashlib.md5(link.encode()).hexdigest(),
+        "title": title,
+        "summary": summary,
+        "link": link,
+        "source": source,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    if os.path.exists(FEEDCACHE_FILE):
+        with open(FEEDCACHE_FILE, 'r', encoding='utf-8') as f:
+            try:
+                cache = json.load(f)
+            except json.JSONDecodeError:
+                cache = []
+    else:
+        cache = []
+    
+    cache.append(entry)
+    with open(FEEDCACHE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+    logger.info(f"Saved to feedcache: {entry['id']}")
+
 def post_latest_news(chat_id):
     global current_index
     attempts = 0
@@ -125,6 +164,7 @@ def post_latest_news(chat_id):
         
         send_message(CHANNEL_ID, message)
         send_message(chat_id, f"Новость отправлена в @TechChronicleTest (источник: {rss_url.split('/')[2]})")
+        save_to_feedcache(title_ru, summary_ru, link, rss_url.split('/')[2])
         
         current_index = (current_index + 1) % len(RSS_URLS)
         break
@@ -132,23 +172,6 @@ def post_latest_news(chat_id):
         send_message(chat_id, "Не удалось найти новости в доступных RSS-лентах")
         logger.error("All RSS feeds returned empty entries")
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    logger.info("Webhook triggered")
-    update = request.get_json()
-    logger.info(f"Received update: {json.dumps(update, ensure_ascii=False)[:200]}...")
-    
-    if 'message' not in update or 'message_id' not in update['message']:
-        logger.warning("No message or message_id in update, skipping")
-        return "OK", 200
-    
-    chat_id = update['message']['chat']['id']
-    message_text = update['message'].get('text', '')
+def get_feedcache(chat...
 
-    if message_text == '/test':
-        post_latest_news(chat_id)
-    
-    return "OK", 200
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+Что-то пошло не так, повторите попытку.
