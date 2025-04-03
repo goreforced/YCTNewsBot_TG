@@ -9,6 +9,7 @@ import sqlite3
 from datetime import datetime, timedelta
 import threading
 import time
+import re
 
 app = Flask(__name__)
 
@@ -22,7 +23,7 @@ DB_FILE = "feedcache.db"
 
 RSS_URLS = [
     "https://www.theverge.com/rss/index.xml",
-    "https://www.windowscentral.com/feed",
+    # "https://www.windowscentral.com/feed" - удалён из-за ошибок
     "https://www.windowslatest.com/feed/",
     "https://9to5google.com/feed/",
     "https://9to5mac.com/feed/",
@@ -42,6 +43,8 @@ start_time = None
 post_count = 0
 error_count = 0
 last_post_time = None
+posting_interval = 3600  # По умолчанию 1 час в секундах
+next_post_event = threading.Event()
 
 # Инициализация SQLite
 def init_db():
@@ -213,6 +216,17 @@ def can_post_to_channel(channel_id):
         return status in ["administrator", "creator"]
     return False
 
+def parse_interval(interval_str):
+    total_seconds = 0
+    matches = re.findall(r'(\d+)([hm])', interval_str.lower())
+    for value, unit in matches:
+        value = int(value)
+        if unit == 'h':
+            total_seconds += value * 3600
+        elif unit == 'm':
+            total_seconds += value * 60
+    return total_seconds if total_seconds > 0 else None
+
 def post_news():
     global current_index, posting_active, post_count, error_count, last_post_time
     while posting_active:
@@ -224,7 +238,9 @@ def post_news():
 
         if not channels:
             logger.info("Нет каналов для постинга")
-            time.sleep(3600)
+            next_post_event.wait(posting_interval)
+            if not posting_active:
+                break
             continue
 
         rss_url = RSS_URLS[current_index]
@@ -252,7 +268,10 @@ def post_news():
                         logger.error(f"Нет прав для постинга в {channel_id}")
 
         current_index = (current_index + 1) % len(RSS_URLS)
-        time.sleep(3600)  # Ждём час
+        next_post_event.wait(posting_interval)
+        next_post_event.clear()
+        if not posting_active:
+            break
 
 def start_posting_thread():
     global posting_thread, posting_active, start_time
@@ -266,6 +285,7 @@ def start_posting_thread():
 def stop_posting_thread():
     global posting_active, posting_thread
     posting_active = False
+    next_post_event.set()  # Разбудить поток, чтобы он завершился
     if posting_thread:
         posting_thread.join()
         posting_thread = None
@@ -277,10 +297,12 @@ def get_status(username):
     next_post = "Не активно"
     if posting_active and last_post_time:
         time_since_last = time.time() - last_post_time
-        time_to_next = 3600 - (time_since_last % 3600)
+        time_to_next = posting_interval - (time_since_last % posting_interval)
         next_post = f"{int(time_to_next // 60)} мин {int(time_to_next % 60)} сек"
+    interval_str = f"{posting_interval // 3600}h {((posting_interval % 3600) // 60)}m" if posting_interval >= 3600 else f"{posting_interval // 60}m"
     return f"""
 Статус бота для вашего канала ({channel_id}):
+Текущий интервал: {interval_str}
 Время до следующего поста: {next_post}
 Запощенных постов: {post_count}
 Аптайм: {uptime}
@@ -291,8 +313,10 @@ def get_help():
     return """
 Доступные команды:
 /start - Проверить доступ и привязать сессию к каналу
-/startposting - Начать постинг новостей раз в час
+/startposting - Начать постинг новостей
 /stopposting - Остановить постинг
+/setinterval <time> - Установить интервал (например, 34m, 1h, 2h 53m)
+/nextpost - Сбросить таймер и запостить немедленно
 /info - Показать текущий статус бота
 /feedcache - Показать содержимое кэша новостей
 /feedcacheclear - Очистить кэш новостей
@@ -355,6 +379,30 @@ def webhook():
             if user_channel:
                 stop_posting_thread()
                 send_message(chat_id, "Постинг остановлен")
+            else:
+                send_message(chat_id, "Вы не админ ни одного канала.")
+        elif message_text.startswith('/setinterval'):
+            if user_channel:
+                try:
+                    interval_str = message_text.split()[1]
+                    new_interval = parse_interval(interval_str)
+                    if new_interval:
+                        global posting_interval
+                        posting_interval = new_interval
+                        send_message(chat_id, f"Интервал постинга установлен: {interval_str}")
+                    else:
+                        send_message(chat_id, "Неверный формат. Используйте: /setinterval 34m, 1h, 2h 53m")
+                except IndexError:
+                    send_message(chat_id, "Укажите интервал: /setinterval 34m")
+            else:
+                send_message(chat_id, "Вы не админ ни одного канала.")
+        elif message_text == '/nextpost':
+            if user_channel:
+                if posting_active:
+                    next_post_event.set()  # Сброс таймера
+                    send_message(chat_id, "Таймер сброшен. Следующий пост будет опубликован немедленно.")
+                else:
+                    send_message(chat_id, "Постинг не активен. Сначала используйте /startposting.")
             else:
                 send_message(chat_id, "Вы не админ ни одного канала.")
         elif message_text == '/info':
