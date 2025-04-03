@@ -13,7 +13,8 @@ import re
 
 app = Flask(__name__)
 
-logging.basicConfig(level=logging.INFO)
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -41,7 +42,7 @@ start_time = None
 post_count = 0
 error_count = 0
 last_post_time = None
-posting_interval = 3600
+posting_interval = 3600  # По умолчанию 1 час в секундах
 next_post_event = threading.Event()
 
 def init_db():
@@ -81,10 +82,12 @@ def send_message(chat_id, text, reply_markup=None):
     }
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
+    logger.info(f"Отправка сообщения в {chat_id}: {text[:50]}...")
     response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
     if response.status_code != 200:
         logger.error(f"Ошибка отправки: {response.text}")
         return False
+    logger.info("Сообщение успешно отправлено")
     return True
 
 def get_article_content(url):
@@ -307,158 +310,172 @@ def get_status(username):
 """
 
 def get_help():
-    return """
+    help_text = """
 Доступные команды:
 /start - Проверить доступ и привязать сессию к каналу
 /startposting - Начать постинг новостей
 /stopposting - Остановить постинг
-/setinterval <time> - Установить интервал (например, 34m, 1h, 2h 53m)
+/setinterval &lt;time&gt; - Установить интервал (например, 34m, 1h, 2h 53m)
 /nextpost - Сбросить таймер и запостить немедленно
 /info - Показать текущий статус бота
 /feedcache - Показать содержимое кэша новостей
 /feedcacheclear - Очистить кэш новостей
-/addadmin <username> - Добавить администратора канала
-/removeadmin <username> - Удалить администратора канала
+/addadmin &lt;username&gt; - Добавить администратора канала
+/removeadmin &lt;username&gt; - Удалить администратора канала
 /help - Показать это сообщение
 """
+    logger.info(f"Текст помощи: {help_text}")
+    return help_text
 
 @app.route('/ping', methods=['GET'])
 def ping():
+    logger.info("Получен пинг")
     return "OK", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    logger.info("Получен запрос на /webhook")
     update = request.get_json()
-    if 'message' in update and 'message_id' in update['message']:
-        chat_id = update['message']['chat']['id']
-        message_text = update['message'].get('text', '')
-        username = update['message']['from'].get('username', None)
+    logger.info(f"Данные запроса: {json.dumps(update, ensure_ascii=False)}")
+    
+    if not update:
+        logger.error("Пустой запрос")
+        return "OK", 200
 
-        if not username:
-            send_message(chat_id, "У вас нет username. Установите его в настройках Telegram.")
-            return "OK", 200
+    if 'message' not in update or 'message_id' not in update['message']:
+        logger.error("Некорректный формат сообщения")
+        return "OK", 200
 
-        logger.info(f"Получена команда: {message_text} от @{username}")
-        user_channel = get_channel_by_admin(username)
+    chat_id = update['message']['chat']['id']
+    message_text = update['message'].get('text', '')
+    username = update['message']['from'].get('username', None)
 
-        if message_text == '/start':
+    logger.info(f"Получена команда: '{message_text}' от @{username} в чате {chat_id}")
+
+    if not username:
+        send_message(chat_id, "У вас нет username. Установите его в настройках Telegram.")
+        return "OK", 200
+
+    user_channel = get_channel_by_admin(username)
+
+    if message_text == '/start':
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT channel_id FROM channels")
+        channels = c.fetchall()
+        conn.close()
+
+        if user_channel:
+            send_message(chat_id, f"Вы уже админ канала {user_channel}. Используйте /startposting для начала.")
+        elif not channels:
+            send_message(chat_id, "Укажите ID канала для постинга (например, @channelname или -1001234567890):")
+        else:
+            send_message(chat_id, "У вас нет прав на управление ботом. Обратитесь к администратору канала.")
+    elif message_text.startswith('@') or message_text.startswith('-100'):
+        channel_id = message_text
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT channel_id FROM channels")
+        if c.fetchone():
+            send_message(chat_id, "Канал уже привязан. У вас нет прав на его управление.")
+        elif can_post_to_channel(channel_id):
+            save_channel(channel_id, username)
+            send_message(chat_id, f"Канал {channel_id} привязан. Вы создатель. Используйте /startposting для начала.")
+        else:
+            send_message(chat_id, "Бот не имеет прав администратора в этом канале.")
+        conn.close()
+    elif message_text == '/startposting':
+        if user_channel:
+            start_posting_thread()
+            send_message(chat_id, f"Постинг начат в {user_channel}")
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text == '/stopposting':
+        if user_channel:
+            stop_posting_thread()
+            send_message(chat_id, "Постинг остановлен")
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text.startswith('/setinterval'):
+        if user_channel:
+            try:
+                interval_str = message_text.split()[1]
+                new_interval = parse_interval(interval_str)
+                if new_interval:
+                    global posting_interval
+                    posting_interval = new_interval
+                    send_message(chat_id, f"Интервал постинга установлен: {interval_str}")
+                else:
+                    send_message(chat_id, "Неверный формат. Используйте: /setinterval 34m, 1h, 2h 53m")
+            except IndexError:
+                send_message(chat_id, "Укажите интервал: /setinterval 34m")
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text == '/nextpost':
+        if user_channel:
+            if posting_active:
+                next_post_event.set()
+                send_message(chat_id, "Таймер сброшен. Следующий пост будет опубликован немедленно.")
+            else:
+                send_message(chat_id, "Постинг не активен. Сначала используйте /startposting.")
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text == '/info':
+        if user_channel:
+            send_message(chat_id, get_status(username))
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text == '/feedcache':
+        if user_channel:
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
-            c.execute("SELECT channel_id FROM channels")
-            channels = c.fetchall()
+            c.execute("SELECT * FROM feedcache")
+            rows = c.fetchall()
             conn.close()
-
-            if user_channel:
-                send_message(chat_id, f"Вы уже админ канала {user_channel}. Используйте /startposting для начала.")
-            elif not channels:
-                send_message(chat_id, "Укажите ID канала для постинга (например, @channelname или -1001234567890):")
+            if not rows:
+                send_message(chat_id, "Feedcache пуст")
             else:
-                send_message(chat_id, "У вас нет прав на управление ботом. Обратитесь к администратору канала.")
-        elif message_text.startswith('@') or message_text.startswith('-100'):
-            channel_id = message_text
+                cache = [dict(zip(["id", "title", "summary", "link", "source", "timestamp"], row)) for row in rows]
+                send_message(chat_id, "Содержимое feedcache:\n" + json.dumps(cache, ensure_ascii=False, indent=2)[:4096])
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text == '/feedcacheclear':
+        if user_channel:
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
-            c.execute("SELECT channel_id FROM channels")
-            if c.fetchone():
-                send_message(chat_id, "Канал уже привязан. У вас нет прав на его управление.")
-            elif can_post_to_channel(channel_id):
-                save_channel(channel_id, username)
-                send_message(chat_id, f"Канал {channel_id} привязан. Вы создатель. Используйте /startposting для начала.")
-            else:
-                send_message(chat_id, "Бот не имеет прав администратора в этом канале.")
+            c.execute("DELETE FROM feedcache")
+            conn.commit()
             conn.close()
-        elif message_text == '/startposting':
-            if user_channel:
-                start_posting_thread()
-                send_message(chat_id, f"Постинг начат в {user_channel}")
-            else:
-                send_message(chat_id, "Вы не админ ни одного канала.")
-        elif message_text == '/stopposting':
-            if user_channel:
-                stop_posting_thread()
-                send_message(chat_id, "Постинг остановлен")
-            else:
-                send_message(chat_id, "Вы не админ ни одного канала.")
-        elif message_text.startswith('/setinterval'):
-            if user_channel:
-                try:
-                    interval_str = message_text.split()[1]
-                    new_interval = parse_interval(interval_str)
-                    if new_interval:
-                        global posting_interval
-                        posting_interval = new_interval
-                        send_message(chat_id, f"Интервал постинга установлен: {interval_str}")
-                    else:
-                        send_message(chat_id, "Неверный формат. Используйте: /setinterval 34m, 1h, 2h 53m")
-                except IndexError:
-                    send_message(chat_id, "Укажите интервал: /setinterval 34m")
-            else:
-                send_message(chat_id, "Вы не админ ни одного канала.")
-        elif message_text == '/nextpost':
-            if user_channel:
-                if posting_active:
-                    next_post_event.set()
-                    send_message(chat_id, "Таймер сброшен. Следующий пост будет опубликован немедленно.")
+            send_message(chat_id, "Feedcache очищен")
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text.startswith('/addadmin'):
+        if user_channel:
+            try:
+                new_admin = message_text.split()[1].lstrip('@')
+                if add_admin(user_channel, new_admin, username):
+                    send_message(chat_id, f"@{new_admin} добавлен как админ канала {user_channel}")
                 else:
-                    send_message(chat_id, "Постинг не активен. Сначала используйте /startposting.")
-            else:
-                send_message(chat_id, "Вы не админ ни одного канала.")
-        elif message_text == '/info':
-            if user_channel:
-                send_message(chat_id, get_status(username))
-            else:
-                send_message(chat_id, "Вы не админ ни одного канала.")
-        elif message_text == '/feedcache':
-            if user_channel:
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                c.execute("SELECT * FROM feedcache")
-                rows = c.fetchall()
-                conn.close()
-                if not rows:
-                    send_message(chat_id, "Feedcache пуст")
+                    send_message(chat_id, "Вы не можете добавлять админов или пользователь уже админ.")
+            except IndexError:
+                send_message(chat_id, "Укажите username: /addadmin @username")
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text.startswith('/removeadmin'):
+        if user_channel:
+            try:
+                admin_to_remove = message_text.split()[1].lstrip('@')
+                if remove_admin(user_channel, admin_to_remove, username):
+                    send_message(chat_id, f"@{admin_to_remove} удалён из админов канала {user_channel}")
                 else:
-                    cache = [dict(zip(["id", "title", "summary", "link", "source", "timestamp"], row)) for row in rows]
-                    send_message(chat_id, "Содержимое feedcache:\n" + json.dumps(cache, ensure_ascii=False, indent=2)[:4096])
-            else:
-                send_message(chat_id, "Вы не админ ни одного канала.")
-        elif message_text == '/feedcacheclear':
-            if user_channel:
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                c.execute("DELETE FROM feedcache")
-                conn.commit()
-                conn.close()
-                send_message(chat_id, "Feedcache очищен")
-            else:
-                send_message(chat_id, "Вы не админ ни одного канала.")
-        elif message_text.startswith('/addadmin'):
-            if user_channel:
-                try:
-                    new_admin = message_text.split()[1].lstrip('@')
-                    if add_admin(user_channel, new_admin, username):
-                        send_message(chat_id, f"@{new_admin} добавлен как админ канала {user_channel}")
-                    else:
-                        send_message(chat_id, "Вы не можете добавлять админов или пользователь уже админ.")
-                except IndexError:
-                    send_message(chat_id, "Укажите username: /addadmin @username")
-            else:
-                send_message(chat_id, "Вы не админ ни одного канала.")
-        elif message_text.startswith('/removeadmin'):
-            if user_channel:
-                try:
-                    admin_to_remove = message_text.split()[1].lstrip('@')
-                    if remove_admin(user_channel, admin_to_remove, username):
-                        send_message(chat_id, f"@{admin_to_remove} удалён из админов канала {user_channel}")
-                    else:
-                        send_message(chat_id, "Нельзя удалить создателя или вы не админ.")
-                except IndexError:
-                    send_message(chat_id, "Укажите username: /removeadmin @username")
-            else:
-                send_message(chat_id, "Вы не админ ни одного канала.")
-        elif message_text == '/help':
-            logger.info(f"Команда /help вызвана @{username}")
-            send_message(chat_id, get_help())
+                    send_message(chat_id, "Нельзя удалить создателя или вы не админ.")
+            except IndexError:
+                send_message(chat_id, "Укажите username: /removeadmin @username")
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text == '/help':
+        logger.info(f"Команда /help вызвана @{username}")
+        send_message(chat_id, get_help())
 
     return "OK", 200
 
