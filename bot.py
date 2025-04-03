@@ -55,9 +55,15 @@ def init_db():
         source TEXT,
         timestamp TEXT
     )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        username TEXT PRIMARY KEY,
-        channel_id TEXT
+    c.execute('''CREATE TABLE IF NOT EXISTS channels (
+        channel_id TEXT PRIMARY KEY,
+        creator_username TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS admins (
+        channel_id TEXT,
+        username TEXT,
+        PRIMARY KEY (channel_id, username),
+        FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
     )''')
     conn.commit()
     conn.close()
@@ -124,7 +130,7 @@ def save_to_feedcache(title, summary, link, source):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     entry = (
-        hashlib.md5((link + title).encode()).hexdigest(),  # Хэш от URL + заголовка
+        hashlib.md5((link + title).encode()).hexdigest(),
         title,
         summary,
         link,
@@ -145,20 +151,57 @@ def check_duplicate(link, title):
     conn.close()
     return result is not None
 
-def get_user_channel(username):
+def get_channel_by_admin(username):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT channel_id FROM users WHERE username = ?", (username,))
+    c.execute("SELECT channel_id FROM admins WHERE username = ?", (username,))
     result = c.fetchone()
     conn.close()
     return result[0] if result else None
 
-def save_user_channel(username, channel_id):
+def get_channel_creator(channel_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO users (username, channel_id) VALUES (?, ?)", (username, channel_id))
+    c.execute("SELECT creator_username FROM channels WHERE channel_id = ?", (channel_id,))
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+def save_channel(channel_id, creator_username):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO channels (channel_id, creator_username) VALUES (?, ?)", (channel_id, creator_username))
+    c.execute("INSERT OR IGNORE INTO admins (channel_id, username) VALUES (?, ?)", (channel_id, creator_username))
     conn.commit()
     conn.close()
+
+def add_admin(channel_id, new_admin_username, requester_username):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT username FROM admins WHERE channel_id = ? AND username = ?", (channel_id, requester_username))
+    if c.fetchone():
+        c.execute("INSERT OR IGNORE INTO admins (channel_id, username) VALUES (?, ?)", (channel_id, new_admin_username))
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
+
+def remove_admin(channel_id, admin_username, requester_username):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT username FROM admins WHERE channel_id = ? AND username = ?", (channel_id, requester_username))
+    if c.fetchone():
+        creator = get_channel_creator(channel_id)
+        if admin_username == creator:
+            conn.close()
+            return False  # Нельзя удалить создателя
+        c.execute("DELETE FROM admins WHERE channel_id = ? AND username = ?", (channel_id, admin_username))
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
 
 def can_post_to_channel(channel_id):
     response = requests.get(f"{TELEGRAM_URL}getChatMember", params={
@@ -175,12 +218,12 @@ def post_news():
     while posting_active:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute("SELECT username, channel_id FROM users")
-        users = c.fetchall()
+        c.execute("SELECT channel_id FROM channels")
+        channels = c.fetchall()
         conn.close()
 
-        if not users:
-            logger.info("Нет пользователей с каналами")
+        if not channels:
+            logger.info("Нет каналов для постинга")
             time.sleep(3600)
             continue
 
@@ -198,7 +241,7 @@ def post_news():
                 error_count += 1
             elif not check_duplicate(link, title):
                 message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}\n\n<i>Пост сгенерирован ИИ</i>"
-                for username, channel_id in users:
+                for (channel_id,) in channels:
                     if can_post_to_channel(channel_id):
                         send_message(channel_id, message)
                         save_to_feedcache(title, summary, link, rss_url.split('/')[2])
@@ -228,22 +271,16 @@ def stop_posting_thread():
         posting_thread = None
     logger.info("Постинг остановлен")
 
-def get_status():
+def get_status(username):
+    channel_id = get_channel_by_admin(username)
     uptime = timedelta(seconds=int(time.time() - start_time)) if start_time else "Не запущен"
     next_post = "Не активно"
     if posting_active and last_post_time:
         time_since_last = time.time() - last_post_time
         time_to_next = 3600 - (time_since_last % 3600)
         next_post = f"{int(time_to_next // 60)} мин {int(time_to_next % 60)} сек"
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT username, channel_id FROM users")
-    users = c.fetchall()
-    conn.close()
-    channels = ", ".join([f"{channel_id} (@{username})" for username, channel_id in users]) if users else "Не привязан"
     return f"""
-Статус бота:
-Канал: {channels}
+Статус бота для вашего канала ({channel_id}):
 Время до следующего поста: {next_post}
 Запощенных постов: {post_count}
 Аптайм: {uptime}
@@ -253,12 +290,14 @@ def get_status():
 def get_help():
     return """
 Доступные команды:
-/start - Привязать канал для постинга
+/start - Проверить доступ и привязать сессию к каналу
 /startposting - Начать постинг новостей раз в час
 /stopposting - Остановить постинг
 /info - Показать текущий статус бота
 /feedcache - Показать содержимое кэша новостей
 /feedcacheclear - Очистить кэш новостей
+/addadmin <username> - Добавить администратора канала
+/removeadmin <username> - Удалить администратора канала
 /help - Показать это сообщение
 """
 
@@ -278,37 +317,51 @@ def webhook():
             send_message(chat_id, "У вас нет username. Установите его в настройках Telegram.")
             return "OK", 200
 
-        user_channel = get_user_channel(username)
+        user_channel = get_channel_by_admin(username)
 
         if message_text == '/start':
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("SELECT channel_id FROM channels")
+            channels = c.fetchall()
+            conn.close()
+
             if user_channel:
-                send_message(chat_id, f"Канал {user_channel} уже привязан. Используйте /startposting для начала.")
-            else:
+                send_message(chat_id, f"Вы уже админ канала {user_channel}. Используйте /startposting для начала.")
+            elif not channels:  # Первый запуск
                 send_message(chat_id, "Укажите ID канала для постинга (например, @channelname или -1001234567890):")
+            else:
+                send_message(chat_id, "У вас нет прав на управление ботом. Обратитесь к администратору канала.")
         elif message_text.startswith('@') or message_text.startswith('-100'):
             channel_id = message_text
-            if can_post_to_channel(channel_id):
-                save_user_channel(username, channel_id)
-                send_message(chat_id, f"Канал {channel_id} привязан. Используйте /startposting для начала.")
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("SELECT channel_id FROM channels")
+            if c.fetchone():  # Если канал уже привязан
+                send_message(chat_id, "Канал уже привязан. У вас нет прав на его управление.")
+            elif can_post_to_channel(channel_id):
+                save_channel(channel_id, username)
+                send_message(chat_id, f"Канал {channel_id} привязан. Вы создатель. Используйте /startposting для начала.")
             else:
                 send_message(chat_id, "Бот не имеет прав администратора в этом канале.")
+            conn.close()
         elif message_text == '/startposting':
             if user_channel:
                 start_posting_thread()
                 send_message(chat_id, f"Постинг начат в {user_channel}")
             else:
-                send_message(chat_id, "Сначала привяжите канал с помощью /start")
+                send_message(chat_id, "Вы не админ ни одного канала.")
         elif message_text == '/stopposting':
             if user_channel:
                 stop_posting_thread()
                 send_message(chat_id, "Постинг остановлен")
             else:
-                send_message(chat_id, "Сначала привяжите канал с помощью /start")
+                send_message(chat_id, "Вы не админ ни одного канала.")
         elif message_text == '/info':
             if user_channel:
-                send_message(chat_id, get_status())
+                send_message(chat_id, get_status(username))
             else:
-                send_message(chat_id, "Сначала привяжите канал с помощью /start")
+                send_message(chat_id, "Вы не админ ни одного канала.")
         elif message_text == '/feedcache':
             if user_channel:
                 conn = sqlite3.connect(DB_FILE)
@@ -322,7 +375,7 @@ def webhook():
                     cache = [dict(zip(["id", "title", "summary", "link", "source", "timestamp"], row)) for row in rows]
                     send_message(chat_id, "Содержимое feedcache:\n" + json.dumps(cache, ensure_ascii=False, indent=2)[:4096])
             else:
-                send_message(chat_id, "Сначала привяжите канал с помощью /start")
+                send_message(chat_id, "Вы не админ ни одного канала.")
         elif message_text == '/feedcacheclear':
             if user_channel:
                 conn = sqlite3.connect(DB_FILE)
@@ -332,12 +385,36 @@ def webhook():
                 conn.close()
                 send_message(chat_id, "Feedcache очищен")
             else:
-                send_message(chat_id, "Сначала привяжите канал с помощью /start")
+                send_message(chat_id, "Вы не админ ни одного канала.")
+        elif message_text.startswith('/addadmin'):
+            if user_channel:
+                try:
+                    new_admin = message_text.split()[1].lstrip('@')
+                    if add_admin(user_channel, new_admin, username):
+                        send_message(chat_id, f"@{new_admin} добавлен как админ канала {user_channel}")
+                    else:
+                        send_message(chat_id, "Вы не можете добавлять админов или пользователь уже админ.")
+                except IndexError:
+                    send_message(chat_id, "Укажите username: /addadmin @username")
+            else:
+                send_message(chat_id, "Вы не админ ни одного канала.")
+        elif message_text.startswith('/removeadmin'):
+            if user_channel:
+                try:
+                    admin_to_remove = message_text.split()[1].lstrip('@')
+                    if remove_admin(user_channel, admin_to_remove, username):
+                        send_message(chat_id, f"@{admin_to_remove} удалён из админов канала {user_channel}")
+                    else:
+                        send_message(chat_id, "Нельзя удалить создателя или вы не админ.")
+                except IndexError:
+                    send_message(chat_id, "Укажите username: /removeadmin @username")
+            else:
+                send_message(chat_id, "Вы не админ ни одного канала.")
         elif message_text == '/help':
             if user_channel:
                 send_message(chat_id, get_help())
             else:
-                send_message(chat_id, "Сначала привяжите канал с помощью /start\n\n" + get_help())
+                send_message(chat_id, "Вы не админ ни одного канала.\n\n" + get_help())
 
     return "OK", 200
 
