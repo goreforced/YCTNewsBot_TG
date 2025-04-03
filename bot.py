@@ -371,7 +371,7 @@ def get_help():
 /start - Привязать канал или проверить доступ
 /startposting - Начать постинг
 /stopposting - Остановить постинг
-/setinterval <time> - Установить интервал (34m, 1h, 2h 53m)
+/setinterval &lt;time&gt; - Установить интервал (34m, 1h, 2h 53m)
 /nextpost - Сбросить таймер и запостить
 /skiprss - Пропустить следующий RSS
 /editprompt - Изменить промпт для ИИ (отправь после команды)
@@ -380,11 +380,11 @@ def get_help():
 /info - Показать статус бота
 /feedcache - Показать кэш новостей
 /feedcacheclear - Очистить кэш
-/addadmin <username> - Добавить админа
-/removeadmin <username> - Удалить админа
+/addadmin &lt;username&gt; - Добавить админа
+/removeadmin &lt;username&gt; - Удалить админа
 /help - Это сообщение
 """
-    logger.info(f"Текст помощи: {help_text}")
+    logger.info(f"Текст помощи перед отправкой: {help_text}")
     return help_text
 
 @app.route('/ping', methods=['GET'])
