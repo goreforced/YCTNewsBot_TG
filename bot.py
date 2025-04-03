@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import hashlib
+import sqlite3
 from datetime import datetime
 
 app = Flask(__name__)
@@ -16,8 +17,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/" if TELEGRAM_TOKEN else None
-FEEDCACHE_FILE = "feedcache.json"
-PENDING_POSTS = {}  # Временное хранилище для постов на утверждение: {chat_id: {post_id: {...}}}
+DB_FILE = "feedcache.db"  # SQLite вместо JSON
+PENDING_POSTS = {}  # Временное хранилище для постов на утверждение
 
 RSS_URLS = [
     "https://www.theverge.com/rss/index.xml",
@@ -33,6 +34,23 @@ RSS_URLS = [
     "https://feeds.feedburner.com/Techcrunch"
 ]
 current_index = 0
+
+# Инициализация SQLite
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS feedcache (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        summary TEXT,
+        link TEXT,
+        source TEXT,
+        timestamp TEXT
+    )''')
+    conn.commit()
+    conn.close()
+
+init_db()
 
 def send_message(chat_id, text, reply_markup=None):
     if not TELEGRAM_TOKEN:
@@ -62,7 +80,7 @@ def send_file(chat_id, file_path):
     if response.status_code != 200:
         logger.error(f"Ошибка отправки файла: {response.text}")
 
-def get_article_content(url):
+def get_article_content(url, user_instructions=None):
     if not OPENROUTER_API_KEY:
         return "Ошибка: OPENROUTER_API_KEY не задан", "Ошибка: OPENROUTER_API_KEY не задан"
     headers = {
@@ -71,9 +89,20 @@ def get_article_content(url):
         "HTTP-Referer": "https://t.me/Tech_Chronicle",
         "X-Title": "TChNewsBot"
     }
-    data = {
-        "model": "google/gemma-2-9b-it:free",
-        "messages": [{"role": "user", "content": f"""
+    if user_instructions:
+        prompt = f"""
+По ссылке {url} есть новость. Пользователь просит пересказать с дополнениями: "{user_instructions}".
+Напиши новый вариант в формате:
+Заголовок в стиле новостного канала
+Основная суть новости в 1-2 предложениях из статьи.
+
+Требования:
+- Бери данные только из статьи.
+- Учти инструкции пользователя.
+- Максимальная длина пересказа — 500 символов.
+"""
+    else:
+        prompt = f"""
 По ссылке {url} напиши новость на русском в следующем формате:
 Заголовок в стиле новостного канала
 Основная суть новости в 1-2 предложениях из статьи.
@@ -84,7 +113,10 @@ def get_article_content(url):
 - Не добавляй "| Источник", названия сайтов или эмодзи.
 - Не используй форматирование вроде ##, ** или [].
 - Максимальная длина пересказа — 500 символов.
-"""}]
+"""
+    data = {
+        "model": "google/gemma-2-9b-it:free",
+        "messages": [{"role": "user", "content": prompt}]
     }
     try:
         response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, data=json.dumps(data), timeout=15)
@@ -102,33 +134,29 @@ def get_article_content(url):
         return f"Ошибка: {str(e)}", f"Ошибка: {str(e)}"
 
 def save_to_feedcache(title, summary, link, source):
-    entry = {
-        "id": hashlib.md5(link.encode()).hexdigest(),
-        "title": title,
-        "summary": summary,
-        "link": link,
-        "source": source,
-        "timestamp": datetime.now().isoformat()
-    }
-    cache = []
-    if os.path.exists(FEEDCACHE_FILE):
-        with open(FEEDCACHE_FILE, 'r', encoding='utf-8') as f:
-            try:
-                cache = json.load(f)
-            except json.JSONDecodeError:
-                cache = []
-    cache.append(entry)
-    with open(FEEDCACHE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
-    logger.info(f"Сохранено в feedcache: {entry['id']}")
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    entry = (
+        hashlib.md5(link.encode()).hexdigest(),
+        title,
+        summary,
+        link,
+        source,
+        datetime.now().isoformat()
+    )
+    c.execute("INSERT OR REPLACE INTO feedcache (id, title, summary, link, source, timestamp) VALUES (?, ?, ?, ?, ?, ?)", entry)
+    conn.commit()
+    conn.close()
+    logger.info(f"Сохранено в feedcache: {entry[0]}")
 
 def check_duplicate(link):
-    if not os.path.exists(FEEDCACHE_FILE):
-        return False
-    with open(FEEDCACHE_FILE, 'r', encoding='utf-8') as f:
-        cache = json.load(f)
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
     link_hash = hashlib.md5(link.encode()).hexdigest()
-    return any(entry["id"] == link_hash for entry in cache)
+    c.execute("SELECT id FROM feedcache WHERE id = ?", (link_hash,))
+    result = c.fetchone()
+    conn.close()
+    return result is not None
 
 def fetch_news(chat_id):
     posts = []
@@ -147,7 +175,7 @@ def fetch_news(chat_id):
         title, summary = get_article_content(link)
         message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}"
         posts.append({"text": message, "link": link, "source": rss_url.split('/')[2], "title": title, "summary": summary})
-        if len(posts) >= 2:  # Ограничиваем 2 постами
+        if len(posts) >= 2:
             break
     
     if not posts:
@@ -163,6 +191,7 @@ def fetch_news(chat_id):
                 [
                     {"text": "Одобрить", "callback_data": f"approve_{post_id}"},
                     {"text": "Редактировать", "callback_data": f"edit_{post_id}"},
+                    {"text": "Пересказ", "callback_data": f"rewrite_{post_id}"},
                     {"text": "Отклонить", "callback_data": f"reject_{post_id}"}
                 ]
             ]
@@ -199,22 +228,30 @@ def post_latest_news(chat_id):
     current_index = (current_index + 1) % len(RSS_URLS)
 
 def get_feedcache(chat_id):
-    if not os.path.exists(FEEDCACHE_FILE):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT * FROM feedcache")
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
         send_message(chat_id, "Feedcache пуст")
         return
-    with open(FEEDCACHE_FILE, 'r', encoding='utf-8') as f:
-        cache = json.load(f)
-        if len(str(cache)) < 4000:
-            send_message(chat_id, "Содержимое feedcache:\n" + json.dumps(cache, ensure_ascii=False, indent=2))
-        else:
-            send_file(chat_id, FEEDCACHE_FILE)
+    cache = [dict(zip(["id", "title", "summary", "link", "source", "timestamp"], row)) for row in rows]
+    if len(str(cache)) < 4000:
+        send_message(chat_id, "Содержимое feedcache:\n" + json.dumps(cache, ensure_ascii=False, indent=2))
+    else:
+        with open("feedcache_temp.json", 'w', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        send_file(chat_id, "feedcache_temp.json")
+        os.remove("feedcache_temp.json")
 
 def clear_feedcache(chat_id):
-    if os.path.exists(FEEDCACHE_FILE):
-        os.remove(FEEDCACHE_FILE)
-        send_message(chat_id, "Feedcache очищен")
-    else:
-        send_message(chat_id, "Feedcache пуст")
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM feedcache")
+    conn.commit()
+    conn.close()
+    send_message(chat_id, "Feedcache очищен")
 
 def handle_callback(chat_id, callback_data, message_id):
     action, post_id = callback_data.split("_", 1)
@@ -238,6 +275,11 @@ def handle_callback(chat_id, callback_data, message_id):
             "inline_keyboard": [[{"text": "Без изменений", "callback_data": f"nochange_title_{post_id}"}]]
         })
         PENDING_POSTS[chat_id][post_id]["state"] = "awaiting_title"
+    elif action == "rewrite":
+        send_message(chat_id, "Введите инструкции для пересказа (например, 'Сделай короче' или 'Добавь деталей'):", {
+            "inline_keyboard": [[{"text": "Без изменений", "callback_data": f"nochange_rewrite_{post_id}"}]]
+        })
+        PENDING_POSTS[chat_id][post_id]["state"] = "awaiting_rewrite"
     elif action == "nochange_title":
         send_message(chat_id, "Введите новое содержание:", {
             "inline_keyboard": [[{"text": "Без изменений", "callback_data": f"nochange_summary_{post_id}"}]]
@@ -249,6 +291,22 @@ def handle_callback(chat_id, callback_data, message_id):
                 [
                     {"text": "Одобрить", "callback_data": f"approve_{post_id}"},
                     {"text": "Редактировать", "callback_data": f"edit_{post_id}"},
+                    {"text": "Пересказ", "callback_data": f"rewrite_{post_id}"},
+                    {"text": "Отклонить", "callback_data": f"reject_{post_id}"}
+                ]
+            ]
+        })
+        del PENDING_POSTS[chat_id][post_id]["state"]
+    elif action == "nochange_rewrite":
+        title, summary = get_article_content(post["link"])  # Повторный пересказ без изменений
+        post["title"], post["summary"] = title, summary
+        post["text"] = f"<b>{title}</b> <a href='{post['link']}'>| Источник</a>\n{summary}"
+        send_message(chat_id, post["text"], {
+            "inline_keyboard": [
+                [
+                    {"text": "Одобрить", "callback_data": f"approve_{post_id}"},
+                    {"text": "Редактировать", "callback_data": f"edit_{post_id}"},
+                    {"text": "Пересказ", "callback_data": f"rewrite_{post_id}"},
                     {"text": "Отклонить", "callback_data": f"reject_{post_id}"}
                 ]
             ]
@@ -295,6 +353,22 @@ def webhook():
                                 [
                                     {"text": "Одобрить", "callback_data": f"approve_{post_id}"},
                                     {"text": "Редактировать", "callback_data": f"edit_{post_id}"},
+                                    {"text": "Пересказ", "callback_data": f"rewrite_{post_id}"},
+                                    {"text": "Отклонить", "callback_data": f"reject_{post_id}"}
+                                ]
+                            ]
+                        })
+                        del post["state"]
+                    elif post["state"] == "awaiting_rewrite":
+                        new_title, new_summary = get_article_content(post["link"], message_text.strip())
+                        post["title"], post["summary"] = new_title, new_summary
+                        post["text"] = f"<b>{new_title}</b> <a href='{post['link']}'>| Источник</a>\n{new_summary}"
+                        send_message(chat_id, post["text"], {
+                            "inline_keyboard": [
+                                [
+                                    {"text": "Одобрить", "callback_data": f"approve_{post_id}"},
+                                    {"text": "Редактировать", "callback_data": f"edit_{post_id}"},
+                                    {"text": "Пересказ", "callback_data": f"rewrite_{post_id}"},
                                     {"text": "Отклонить", "callback_data": f"reject_{post_id}"}
                                 ]
                             ]
