@@ -198,7 +198,7 @@ def post_news():
                 if "Ошибка" in title:
                     error_count += 1
                 else:
-                    message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}"
+                    message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}\n\n<i>Пост сгенерирован ИИ</i>"
                     for username, channel_id in users:
                         if can_post_to_channel(channel_id):
                             send_message(channel_id, message)
@@ -249,6 +249,18 @@ def get_status():
 Запощенных постов: {post_count}
 Аптайм: {uptime}
 Ошибок: {error_count}
+"""
+
+def get_help():
+    return """
+Доступные команды:
+/start - Привязать канал для постинга
+/startposting - Начать постинг новостей раз в час
+/stopposting - Остановить постинг
+/info - Показать текущий статус бота
+/feedcache - Показать содержимое кэша новостей
+/feedcacheclear - Очистить кэш новостей
+/help - Показать это сообщение
 """
 
 @app.route('/ping', methods=['GET'])
@@ -322,6 +334,11 @@ def webhook():
                 send_message(chat_id, "Feedcache очищен")
             else:
                 send_message(chat_id, "Сначала привяжите канал с помощью /start")
+        elif message_text == '/help':
+            if user_channel:
+                send_message(chat_id, get_help())
+            else:
+                send_message(chat_id, "Сначала привяжите канал с помощью /start\n\n" + get_help())
 
     return "OK", 200
 
