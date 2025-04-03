@@ -56,12 +56,13 @@ def get_article_content(url):
                 "role": "user",
                 "content": f"""
 По ссылке {url} напиши новость на русском в следующем формате:
-Заголовок (до 80 символов) в стиле новостного канала.
+Заголовок (до 80 символов) в стиле новостного канала | Источник
 Основная суть новости в 1-2 предложениях из статьи.
 
 Требования:
 - Бери данные только из статьи, ничего не придумывай.
 - Внимательно проверяй даты в статье, не путай их.
+- Не добавляй форматирование вроде ##, ** или [].
 - Максимальная длина пересказа — 500 символов.
 """
             }
@@ -102,7 +103,7 @@ def post_latest_news(chat_id):
     
     logger.info(f"Processing news from: {link} (source: {rss_url})")
     title_ru, summary_ru = get_article_content(link)
-    message = f"<b>{title_ru[:80]}</b> <a href='{link}'>Источник</a>\n{summary_ru}"
+    message = f"<b>{title_ru[:80]}</b> <a href='{link}'>| Источник</a>\n{summary_ru}"
     
     send_message(CHANNEL_ID, message)
     send_message(chat_id, f"Новость отправлена в @TechChronicleTest (источник: {rss_url.split('/')[2]})")
