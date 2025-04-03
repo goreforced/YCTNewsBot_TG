@@ -39,6 +39,7 @@ def send_scheduled_message(chat_id, text, schedule_date):
         return False
     payload = {
         "chat_id": chat_id,
+        "sender_chat_id": chat_id,  # Отправляем от имени канала
         "text": text,
         "parse_mode": "HTML",
         "schedule_date": int(schedule_date.timestamp())
