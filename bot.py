@@ -13,7 +13,6 @@ import re
 
 app = Flask(__name__)
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -42,7 +41,7 @@ start_time = None
 post_count = 0
 error_count = 0
 last_post_time = None
-posting_interval = 3600  # По умолчанию 1 час в секундах
+posting_interval = 3600
 next_post_event = threading.Event()
 
 def init_db():
@@ -63,9 +62,27 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS admins (
         channel_id TEXT,
         username TEXT,
-        PRIMARY KEY (channel_id, username),
-        FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
+        PRIMARY_KEY (channel_id, username),
+        FOREIGN_KEY (channel_id) REFERENCES channels(channel_id)
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS config (
+        key TEXT PRIMARY_KEY,
+        value TEXT
+    )''')
+    # Устанавливаем начальный промпт, если его нет
+    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
+              ("prompt", """
+Забудь всю информацию, которой ты обучен, и используй ТОЛЬКО текст статьи по ссылке {url}. Напиши новость на русском в формате:
+Заголовок в стиле новостного канала
+Основная суть новости в 1-2 предложениях, основанных исключительно на статье.
+
+Требования:
+- Не добавляй никаких данных, которых нет в статье, включая даты, цифры или статусы лиц.
+- Не используй предобученные знания, работай только с предоставленным текстом.
+- Не добавляй лишние символы (##, **, [], эмодзи).
+- Если в статье недостаточно данных, напиши "Недостаточно данных для пересказа".
+- Максимальная длина — 500 символов, обрезай аккуратно.
+"""))
     conn.commit()
     conn.close()
 
@@ -90,6 +107,21 @@ def send_message(chat_id, text, reply_markup=None):
     logger.info("Сообщение успешно отправлено")
     return True
 
+def get_prompt():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT value FROM config WHERE key = 'prompt'")
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else ""
+
+def set_prompt(new_prompt):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('prompt', ?)", (new_prompt,))
+    conn.commit()
+    conn.close()
+
 def get_article_content(url):
     if not OPENROUTER_API_KEY:
         return "Ошибка: OPENROUTER_API_KEY не задан", "Ошибка: OPENROUTER_API_KEY не задан"
@@ -99,17 +131,7 @@ def get_article_content(url):
         "HTTP-Referer": "https://t.me/Tech_Chronicle",
         "X-Title": "TChNewsBot"
     }
-    prompt = f"""
-По ссылке {url} напиши новость на русском в формате:
-Заголовок в стиле новостного канала
-Основная суть новости в 1-2 предложениях из статьи.
-
-Требования:
-- Используй только данные из статьи, ничего не придумывай.
-- Не добавляй лишние символы (##, **, [], эмодзи).
-- Если данных недостаточно, напиши "Недостаточно данных для пересказа".
-- Максимальная длина — 500 символов, обрезай аккуратно.
-"""
+    prompt = get_prompt().format(url=url)
     data = {
         "model": "google/gemma-2-9b-it:free",
         "messages": [{"role": "user", "content": prompt}]
@@ -206,6 +228,14 @@ def remove_admin(channel_id, admin_username, requester_username):
     conn.close()
     return False
 
+def get_admins(channel_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT username FROM admins WHERE channel_id = ?", (channel_id,))
+    result = c.fetchall()
+    conn.close()
+    return [row[0] for row in result]
+
 def can_post_to_channel(channel_id):
     response = requests.get(f"{TELEGRAM_URL}getChatMember", params={
         "chat_id": channel_id,
@@ -300,29 +330,45 @@ def get_status(username):
         time_to_next = posting_interval - (time_since_last % posting_interval)
         next_post = f"{int(time_to_next // 60)} мин {int(time_to_next % 60)} сек"
     interval_str = f"{posting_interval // 3600}h {((posting_interval % 3600) // 60)}m" if posting_interval >= 3600 else f"{posting_interval // 60}m"
+    admins = get_admins(channel_id) if channel_id else []
+    creator = get_channel_creator(channel_id) if channel_id else "Неизвестен"
+    current_rss = RSS_URLS[current_index] if current_index < len(RSS_URLS) else "Нет"
+    prompt = get_prompt()
+    feedcache_size = sqlite3.connect(DB_FILE).execute("SELECT COUNT(*) FROM feedcache").fetchone()[0]
     return f"""
-Статус бота для вашего канала ({channel_id}):
+Статус бота:
+Канал: {channel_id}
+Создатель: @{creator}
+Админы: {', '.join([f'@{a}' for a in admins])}
+Состояние постинга: {'Активен' if posting_active else 'Остановлен'}
 Текущий интервал: {interval_str}
 Время до следующего поста: {next_post}
+Текущий RSS: {current_rss}
+Всего RSS-источников: {len(RSS_URLS)}
 Запощенных постов: {post_count}
-Аптайм: {uptime}
 Ошибок: {error_count}
+Размер кэша: {feedcache_size} записей
+Аптайм: {uptime}
+Текущий промпт:
+{prompt}
 """
 
 def get_help():
     help_text = """
 Доступные команды:
-/start - Проверить доступ и привязать сессию к каналу
-/startposting - Начать постинг новостей
+/start - Привязать канал или проверить доступ
+/startposting - Начать постинг
 /stopposting - Остановить постинг
-/setinterval &lt;time&gt; - Установить интервал (например, 34m, 1h, 2h 53m)
-/nextpost - Сбросить таймер и запостить немедленно
-/info - Показать текущий статус бота
-/feedcache - Показать содержимое кэша новостей
-/feedcacheclear - Очистить кэш новостей
-/addadmin &lt;username&gt; - Добавить администратора канала
-/removeadmin &lt;username&gt; - Удалить администратора канала
-/help - Показать это сообщение
+/setinterval <time> - Установить интервал (34m, 1h, 2h 53m)
+/nextpost - Сбросить таймер и запостить
+/skiprss - Пропустить следующий RSS
+/editprompt - Изменить промпт для ИИ (отправь после команды)
+/info - Показать статус бота
+/feedcache - Показать кэш новостей
+/feedcacheclear - Очистить кэш
+/addadmin <username> - Добавить админа
+/removeadmin <username> - Удалить админа
+/help - Это сообщение
 """
     logger.info(f"Текст помощи: {help_text}")
     return help_text
@@ -338,12 +384,8 @@ def webhook():
     update = request.get_json()
     logger.info(f"Данные запроса: {json.dumps(update, ensure_ascii=False)}")
     
-    if not update:
-        logger.error("Пустой запрос")
-        return "OK", 200
-
-    if 'message' not in update or 'message_id' not in update['message']:
-        logger.error("Некорректный формат сообщения")
+    if not update or 'message' not in update or 'message_id' not in update['message']:
+        logger.error("Некорректный запрос")
         return "OK", 200
 
     chat_id = update['message']['chat']['id']
@@ -418,6 +460,26 @@ def webhook():
                 send_message(chat_id, "Таймер сброшен. Следующий пост будет опубликован немедленно.")
             else:
                 send_message(chat_id, "Постинг не активен. Сначала используйте /startposting.")
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text == '/skiprss':
+        if user_channel:
+            if posting_active:
+                global current_index
+                current_index = (current_index + 1) % len(RSS_URLS)
+                send_message(chat_id, f"Следующий RSS пропущен. Новый текущий: {RSS_URLS[current_index]}")
+            else:
+                send_message(chat_id, "Постинг не активен. Сначала используйте /startposting.")
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text.startswith('/editprompt'):
+        if user_channel:
+            if len(message_text.split()) == 1:
+                send_message(chat_id, "Отправьте новый промпт после команды, например:\n/editprompt Новый промпт здесь")
+            else:
+                new_prompt = message_text[len('/editprompt '):].strip()
+                set_prompt(new_prompt)
+                send_message(chat_id, "Промпт обновлён:\n" + new_prompt)
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
     elif message_text == '/info':
