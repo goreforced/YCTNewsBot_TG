@@ -127,9 +127,14 @@ db = Database(config.DB_FILE)
 class TelegramBot:
     def __init__(self, token: str):
         self.token = token
-        self.session = aiohttp.ClientSession()
+        self.session = None
         self.base_url = f"https://api.telegram.org/bot{token}/"
         self.pending_posts: Dict[int, Dict[str, PendingPost]] = {}
+    
+    async def init(self):
+        """Асинхронная инициализация сессии"""
+        self.session = aiohttp.ClientSession()
+        return self
     
     async def send_message(
         self,
@@ -195,14 +200,37 @@ class TelegramBot:
             logger.error(f"Error editing message: {e}")
             return False
     
+    async def get_updates(self, offset: Optional[int] = None, timeout: int = 30):
+        params = {"timeout": timeout}
+        if offset:
+            params["offset"] = offset
+        
+        try:
+            async with self.session.get(
+                f"{self.base_url}getUpdates",
+                params=params
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                return None
+        except Exception as e:
+            logger.error(f"Error getting updates: {e}")
+            return None
+    
     async def close(self):
-        await self.session.close()
+        if self.session:
+            await self.session.close()
 
 # ==================== Клиент OpenRouter ====================
 class OpenRouterClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
+        self.session = None
+    
+    async def init(self):
+        """Асинхронная инициализация сессии"""
         self.session = aiohttp.ClientSession()
+        return self
     
     @lru_cache(maxsize=100)
     async def summarize_article(self, url: str) -> Tuple[str, str]:
@@ -245,9 +273,10 @@ class OpenRouterClient:
             return f"Ошибка: {str(e)}", f"Ошибка: {str(e)}"
     
     async def close(self):
-        await self.session.close()
+        if self.session:
+            await self.session.close()
 
-# ==================== RSS пр��цессор ====================
+# ==================== RSS процессор ====================
 class RSSProcessor:
     def __init__(self, rss_urls: List[str]):
         self.urls = rss_urls
@@ -293,9 +322,15 @@ class RSSProcessor:
 # ==================== Основное приложение ====================
 class NewsBotApplication:
     def __init__(self):
-        self.bot = TelegramBot(config.TELEGRAM_TOKEN)
-        self.openrouter = OpenRouterClient(config.OPENROUTER_API_KEY)
+        self.bot = None
+        self.openrouter = None
         self.rss_processor = RSSProcessor(config.RSS_URLS)
+    
+    async def init(self):
+        """Асинхронная инициализация"""
+        self.bot = await TelegramBot(config.TELEGRAM_TOKEN).init()
+        self.openrouter = await OpenRouterClient(config.OPENROUTER_API_KEY).init()
+        return self
     
     async def handle_update(self, update: dict):
         if "message" in update:
@@ -523,32 +558,40 @@ class NewsBotApplication:
 """
         await self.bot.send_message(chat_id, help_text)
     
-    async def run(self):
-        # Здесь должна быть реализация вебхука или поллинга
-        # Например, для Flask:
-        from flask import Flask, request
-        app = Flask(__name__)
+    async def start_polling(self):
+        """Основной цикл поллинга"""
+        offset = None
+        logger.info("Бот запущен в режиме long polling...")
         
-        @app.route('/webhook', methods=['POST'])
-        async def webhook():
-            update = request.get_json()
-            await self.handle_update(update)
-            return "OK", 200
-        
-        app.run(host="0.0.0.0", port=5000)
+        while True:
+            try:
+                updates = await self.bot.get_updates(offset=offset, timeout=30)
+                if updates and updates.get("ok"):
+                    for update in updates["result"]:
+                        offset = update["update_id"] + 1
+                        await self.handle_update(update)
+                else:
+                    await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Ошибка в основном цикле: {e}")
+                await asyncio.sleep(5)
     
     async def shutdown(self):
         await self.bot.close()
         await self.openrouter.close()
 
 # ==================== Запуск приложения ====================
-if __name__ == "__main__":
-    app = NewsBotApplication()
-    
+async def main():
     try:
-        asyncio.run(app.run())
+        app = await NewsBotApplication().init()
+        await app.start_polling()
     except KeyboardInterrupt:
-        asyncio.run(app.shutdown())
+        logger.info("Бот остановлен по запросу пользователя")
     except Exception as e:
-        logger.critical(f"Fatal error: {e}")
-        asyncio.run(app.shutdown())
+        logger.critical(f"Критическая ошибка: {e}")
+    finally:
+        if 'app' in locals():
+            await app.shutdown()
+
+if __name__ == "__main__":
+    asyncio.run(main())
