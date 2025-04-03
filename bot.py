@@ -23,7 +23,6 @@ DB_FILE = "feedcache.db"
 
 RSS_URLS = [
     "https://www.theverge.com/rss/index.xml",
-    # "https://www.windowscentral.com/feed" - удалён из-за ошибок
     "https://www.windowslatest.com/feed/",
     "https://9to5google.com/feed/",
     "https://9to5mac.com/feed/",
@@ -35,7 +34,6 @@ RSS_URLS = [
     "https://feeds.feedburner.com/Techcrunch"
 ]
 
-# Глобальные переменные для управления постингом и статуса
 current_index = 0
 posting_active = False
 posting_thread = None
@@ -43,10 +41,9 @@ start_time = None
 post_count = 0
 error_count = 0
 last_post_time = None
-posting_interval = 3600  # По умолчанию 1 час в секундах
+posting_interval = 3600
 next_post_event = threading.Event()
 
-# Инициализация SQLite
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -198,7 +195,7 @@ def remove_admin(channel_id, admin_username, requester_username):
         creator = get_channel_creator(channel_id)
         if admin_username == creator:
             conn.close()
-            return False  # Нельзя удалить создателя
+            return False
         c.execute("DELETE FROM admins WHERE channel_id = ? AND username = ?", (channel_id, admin_username))
         conn.commit()
         conn.close()
@@ -285,7 +282,7 @@ def start_posting_thread():
 def stop_posting_thread():
     global posting_active, posting_thread
     posting_active = False
-    next_post_event.set()  # Разбудить поток, чтобы он завершился
+    next_post_event.set()
     if posting_thread:
         posting_thread.join()
         posting_thread = None
@@ -341,6 +338,7 @@ def webhook():
             send_message(chat_id, "У вас нет username. Установите его в настройках Telegram.")
             return "OK", 200
 
+        logger.info(f"Получена команда: {message_text} от @{username}")
         user_channel = get_channel_by_admin(username)
 
         if message_text == '/start':
@@ -352,7 +350,7 @@ def webhook():
 
             if user_channel:
                 send_message(chat_id, f"Вы уже админ канала {user_channel}. Используйте /startposting для начала.")
-            elif not channels:  # Первый запуск
+            elif not channels:
                 send_message(chat_id, "Укажите ID канала для постинга (например, @channelname или -1001234567890):")
             else:
                 send_message(chat_id, "У вас нет прав на управление ботом. Обратитесь к администратору канала.")
@@ -361,7 +359,7 @@ def webhook():
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             c.execute("SELECT channel_id FROM channels")
-            if c.fetchone():  # Если канал уже привязан
+            if c.fetchone():
                 send_message(chat_id, "Канал уже привязан. У вас нет прав на его управление.")
             elif can_post_to_channel(channel_id):
                 save_channel(channel_id, username)
@@ -399,7 +397,7 @@ def webhook():
         elif message_text == '/nextpost':
             if user_channel:
                 if posting_active:
-                    next_post_event.set()  # Сброс таймера
+                    next_post_event.set()
                     send_message(chat_id, "Таймер сброшен. Следующий пост будет опубликован немедленно.")
                 else:
                     send_message(chat_id, "Постинг не активен. Сначала используйте /startposting.")
@@ -459,10 +457,8 @@ def webhook():
             else:
                 send_message(chat_id, "Вы не админ ни одного канала.")
         elif message_text == '/help':
-            if user_channel:
-                send_message(chat_id, get_help())
-            else:
-                send_message(chat_id, "Вы не админ ни одного канала.\n\n" + get_help())
+            logger.info(f"Команда /help вызвана @{username}")
+            send_message(chat_id, get_help())
 
     return "OK", 200
 
