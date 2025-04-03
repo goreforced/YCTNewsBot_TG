@@ -15,7 +15,6 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/" if TELEGRAM_TOKEN else None
 
-# Список RSS-лент
 RSS_URLS = [
     "https://www.tomshardware.com/feeds/all",
     "https://feeds.feedburner.com/Techcrunch",
@@ -23,7 +22,7 @@ RSS_URLS = [
     "https://www.wired.com/feed/rss",
     "https://arstechnica.com/feed/"
 ]
-current_index = 0  # Глобальный индекс текущего источника
+current_index = 0
 
 def send_message(chat_id, text):
     if not TELEGRAM_TOKEN:
@@ -58,14 +57,12 @@ def get_article_content(url):
                 "content": f"""
 По ссылке {url} напиши новость на русском в следующем формате:
 Заголовок (до 80 символов) в стиле новостного канала.
-[Основная суть новости в 1-2 предложениях из статьи.]
+Основная суть новости в 1-2 предложениях из статьи.
 
 Требования:
-- Используй квадратные скобки для абзаца.
 - Бери данные только из статьи, ничего не придумывай.
 - Внимательно проверяй даты в статье, не путай их.
 - Максимальная длина пересказа — 500 символов.
-- Разделяй заголовок и пересказ символом \\n.
 """
             }
         ]
@@ -105,13 +102,12 @@ def post_latest_news(chat_id):
     
     logger.info(f"Processing news from: {link} (source: {rss_url})")
     title_ru, summary_ru = get_article_content(link)
-    full_title = f"{title_ru[:80]} <a href='{link}'>Источник</a>"
-    message = f"<b>{full_title}</b>\n{summary_ru}"
+    message = f"<b>{title_ru[:80]}</b> <a href='{link}'>Источник</a>\n{summary_ru}"
     
     send_message(CHANNEL_ID, message)
     send_message(chat_id, f"Новость отправлена в @TechChronicleTest (источник: {rss_url.split('/')[2]})")
     
-    current_index = (current_index + 1) % len(RSS_URLS)  # Переход к следующему источнику
+    current_index = (current_index + 1) % len(RSS_URLS)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
