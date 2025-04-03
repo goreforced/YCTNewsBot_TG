@@ -41,15 +41,19 @@ def send_scheduled_message(chat_id, text, schedule_date):
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
-        "schedule_date": int(schedule_date.timestamp())  # Unix timestamp в секундах
+        "schedule_date": int(schedule_date.timestamp())
     }
     logger.info(f"Планируем пост на {schedule_date} (timestamp: {int(schedule_date.timestamp())})")
     response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
     if response.status_code != 200:
         logger.error(f"Ошибка планирования: {response.text}")
         return False
-    logger.info(f"Пост успешно запланирован: {response.json()}")
-    return True
+    result = response.json()
+    if result.get("ok"):
+        logger.info(f"Пост успешно запланирован: {json.dumps(result, ensure_ascii=False)}")
+        return True
+    logger.error(f"Ошибка от Telegram: {result}")
+    return False
 
 def send_message(chat_id, text):
     if not TELEGRAM_TOKEN:
@@ -151,6 +155,8 @@ def fetch_news(chat_id):
         if send_scheduled_message(CHANNEL_ID, message, schedule_date):
             save_to_feedcache(title, summary, link, rss_url.split('/')[2])
             successful += 1
+        else:
+            send_message(chat_id, f"Ошибка планирования поста для {rss_url.split('/')[2]}")
     
     send_message(chat_id, f"Запланировано {successful} постов с интервалом 1 час")
 
