@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -17,6 +17,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/" if TELEGRAM_TOKEN else None
 FEEDCACHE_FILE = "feedcache.json"
+PENDING_POSTS = {}  # Временное хранилище для постов на утверждение: {chat_id: {post_id: {...}}}
 
 RSS_URLS = [
     "https://www.theverge.com/rss/index.xml",
@@ -33,48 +34,22 @@ RSS_URLS = [
 ]
 current_index = 0
 
-def send_scheduled_message(chat_id, text, schedule_date):
+def send_message(chat_id, text, reply_markup=None):
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_TOKEN не задан")
         return False
     payload = {
         "chat_id": chat_id,
-        "sender_chat_id": chat_id,  # Отправляем от имени канала
         "text": text,
-        "parse_mode": "HTML",
-        "schedule_date": int(schedule_date.timestamp())
+        "parse_mode": "HTML"
     }
-    logger.info(f"Планируем пост на {schedule_date} (timestamp: {int(schedule_date.timestamp())})")
-    response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
-    if response.status_code != 200:
-        logger.error(f"Ошибка планирования: {response.text}")
-        return False
-    result = response.json()
-    if result.get("ok"):
-        logger.info(f"Пост успешно запланирован: {json.dumps(result, ensure_ascii=False)}")
-        return True
-    logger.error(f"Ошибка от Telegram: {result}")
-    return False
-
-def send_message(chat_id, text):
-    if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN не задан")
-        return
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
     response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
     if response.status_code != 200:
         logger.error(f"Ошибка отправки: {response.text}")
-
-def send_file(chat_id, file_path):
-    if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN не задан")
-        return
-    with open(file_path, 'rb') as f:
-        files = {'document': (file_path, f)}
-        payload = {"chat_id": chat_id}
-        response = requests.post(f"{TELEGRAM_URL}sendDocument", data=payload, files=files)
-    if response.status_code != 200:
-        logger.error(f"Ошибка отправки файла: {response.text}")
+        return False
+    return True
 
 def get_article_content(url):
     if not OPENROUTER_API_KEY:
@@ -136,12 +111,17 @@ def save_to_feedcache(title, summary, link, source):
         json.dump(cache, f, ensure_ascii=False, indent=2)
     logger.info(f"Сохранено в feedcache: {entry['id']}")
 
+def check_duplicate(link):
+    if not os.path.exists(FEEDCACHE_FILE):
+        return False
+    with open(FEEDCACHE_FILE, 'r', encoding='utf-8') as f:
+        cache = json.load(f)
+    link_hash = hashlib.md5(link.encode()).hexdigest()
+    return any(entry["id"] == link_hash for entry in cache)
+
 def fetch_news(chat_id):
-    start_time = datetime.now() + timedelta(minutes=5)  # Начинаем через 5 минут
-    interval = timedelta(hours=1)  # Интервал 1 час
-    successful = 0
-    
-    for i, rss_url in enumerate(RSS_URLS):
+    posts = []
+    for rss_url in RSS_URLS:
         feed = feedparser.parse(rss_url)
         if not feed.entries:
             logger.warning(f"Нет записей в {rss_url}")
@@ -149,17 +129,36 @@ def fetch_news(chat_id):
         
         latest_entry = feed.entries[0]
         link = latest_entry.link
+        if check_duplicate(link):
+            logger.info(f"Дубль пропущен: {link}")
+            continue
+        
         title, summary = get_article_content(link)
         message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}"
-        
-        schedule_date = start_time + (i * interval)
-        if send_scheduled_message(CHANNEL_ID, message, schedule_date):
-            save_to_feedcache(title, summary, link, rss_url.split('/')[2])
-            successful += 1
-        else:
-            send_message(chat_id, f"Ошибка планирования поста для {rss_url.split('/')[2]}")
+        posts.append({"text": message, "link": link, "source": rss_url.split('/')[2], "title": title, "summary": summary})
+        if len(posts) >= 2:  # Ограничиваем 2 постами
+            break
     
-    send_message(chat_id, f"Запланировано {successful} постов с интервалом 1 час")
+    if not posts:
+        send_message(chat_id, "Нет новых новостей для обработки")
+        return
+    
+    PENDING_POSTS[chat_id] = {}
+    for i, post in enumerate(posts):
+        post_id = f"{chat_id}_{i}"
+        PENDING_POSTS[chat_id][post_id] = post
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "Одобрить", "callback_data": f"approve_{post_id}"},
+                    {"text": "Редактировать", "callback_data": f"edit_{post_id}"},
+                    {"text": "Отклонить", "callback_data": f"reject_{post_id}"}
+                ]
+            ]
+        }
+        send_message(chat_id, post["text"], reply_markup)
+    
+    send_message(chat_id, "Оцени предложенные посты выше")
 
 def post_latest_news(chat_id):
     global current_index
@@ -174,6 +173,11 @@ def post_latest_news(chat_id):
     
     latest_entry = feed.entries[0]
     link = latest_entry.link
+    if check_duplicate(link):
+        send_message(chat_id, "Новость уже публиковалась")
+        current_index = (current_index + 1) % len(RSS_URLS)
+        return
+    
     title, summary = get_article_content(link)
     message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}"
     
@@ -183,40 +187,72 @@ def post_latest_news(chat_id):
     
     current_index = (current_index + 1) % len(RSS_URLS)
 
-def get_feedcache(chat_id):
-    if not os.path.exists(FEEDCACHE_FILE):
-        send_message(chat_id, "Feedcache пуст")
+def handle_callback(chat_id, callback_data, message_id):
+    action, post_id = callback_data.split("_", 1)
+    
+    if chat_id not in PENDING_POSTS or post_id not in PENDING_POSTS[chat_id]:
+        send_message(chat_id, "Пост не найден")
         return
-    with open(FEEDCACHE_FILE, 'r', encoding='utf-8') as f:
-        cache = json.load(f)
-        if len(str(cache)) < 4000:
-            send_message(chat_id, "Содержимое feedcache:\n" + json.dumps(cache, ensure_ascii=False, indent=2))
-        else:
-            send_file(chat_id, FEEDCACHE_FILE)
+    
+    post = PENDING_POSTS[chat_id][post_id]
+    
+    if action == "approve":
+        send_message(CHANNEL_ID, post["text"])
+        save_to_feedcache(post["title"], post["summary"], post["link"], post["source"])
+        send_message(chat_id, "Пост одобрен и опубликован")
+        del PENDING_POSTS[chat_id][post_id]
+    elif action == "reject":
+        send_message(chat_id, "Пост отклонён")
+        del PENDING_POSTS[chat_id][post_id]
+    elif action == "edit":
+        send_message(chat_id, "Введите новый заголовок (оставьте пустым, если без изменений):")
+        PENDING_POSTS[chat_id][post_id]["state"] = "awaiting_title"
 
-def clear_feedcache(chat_id):
-    if os.path.exists(FEEDCACHE_FILE):
-        os.remove(FEEDCACHE_FILE)
-        send_message(chat_id, "Feedcache очищен")
-    else:
-        send_message(chat_id, "Feedcache пуст")
+    if not PENDING_POSTS[chat_id]:
+        del PENDING_POSTS[chat_id]
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = request.get_json()
-    if 'message' not in update or 'message_id' not in update['message']:
-        return "OK", 200
-    chat_id = update['message']['chat']['id']
-    message_text = update['message'].get('text', '')
-
-    if message_text == '/fetch':
-        fetch_news(chat_id)
-    elif message_text == '/test':
-        post_latest_news(chat_id)
-    elif message_text == '/feedcache':
-        get_feedcache(chat_id)
-    elif message_text == '/feedcacheclear':
-        clear_feedcache(chat_id)
+    if 'message' in update and 'message_id' in update['message']:
+        chat_id = update['message']['chat']['id']
+        message_text = update['message'].get('text', '')
+        
+        if message_text == '/fetch':
+            fetch_news(chat_id)
+        elif message_text == '/test':
+            post_latest_news(chat_id)
+        elif chat_id in PENDING_POSTS:
+            for post_id, post in PENDING_POSTS[chat_id].items():
+                if "state" in post:
+                    if post["state"] == "awaiting_title":
+                        new_title = message_text.strip() or post["title"]
+                        post["title"] = new_title
+                        post["text"] = f"<b>{new_title}</b> <a href='{post['link']}'>| Источник</a>\n{post['summary']}"
+                        send_message(chat_id, "Введите новое содержание (оставьте пустым, если без изменений):")
+                        post["state"] = "awaiting_summary"
+                    elif post["state"] == "awaiting_summary":
+                        new_summary = message_text.strip() or post["summary"]
+                        post["summary"] = new_summary
+                        post["text"] = f"<b>{post['title']}</b> <a href='{post['link']}'>| Источник</a>\n{new_summary}"
+                        send_message(chat_id, post["text"], {
+                            "inline_keyboard": [
+                                [
+                                    {"text": "Одобрить", "callback_data": f"approve_{post_id}"},
+                                    {"text": "Редактировать", "callback_data": f"edit_{post_id}"},
+                                    {"text": "Отклонить", "callback_data": f"reject_{post_id}"}
+                                ]
+                            ]
+                        })
+                        del post["state"]
+    
+    elif 'callback_query' in update:
+        callback = update['callback_query']
+        chat_id = callback['message']['chat']['id']
+        callback_data = callback['data']
+        message_id = callback['message']['message_id']
+        handle_callback(chat_id, callback_data, message_id)
+        requests.post(f"{TELEGRAM_URL}answerCallbackQuery", json={"callback_query_id": callback['id']})
     
     return "OK", 200
 
