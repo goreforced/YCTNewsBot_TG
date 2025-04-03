@@ -15,12 +15,19 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/" if TELEGRAM_TOKEN else None
 
+# Обновлённый список RSS-лент
 RSS_URLS = [
-    "https://www.tomshardware.com/feeds/all",
-    "https://feeds.feedburner.com/Techcrunch",
     "https://www.theverge.com/rss/index.xml",
-    "https://www.wired.com/feed/rss",
-    "https://arstechnica.com/feed/"
+    "https://www.windowscentral.com/feed",
+    "https://www.windowslatest.com/feed/",
+    "https://9to5google.com/feed/",
+    "https://9to5mac.com/feed/",
+    "https://www.androidcentral.com/feed",
+    "https://arstechnica.com/feed/",
+    "https://uk.pcmag.com/rss",
+    "https://www.bleepingcomputer.com/feed/",
+    "https://www.androidauthority.com/news/feed/",
+    "https://feeds.feedburner.com/Techcrunch"
 ]
 current_index = 0
 
@@ -85,7 +92,7 @@ def get_article_content(url):
             content = result["choices"][0]["message"]["content"].strip()
             if "\n" in content:
                 title, summary = content.split("\n", 1)
-                return title, summary[:500]  # Ограничение только для пересказа
+                return title, summary[:500]
             return content[:80], "Пересказ не получен"
         return "Ошибка: Нет ответа от API", "Ошибка: Нет ответа от API"
     except requests.exceptions.Timeout:
