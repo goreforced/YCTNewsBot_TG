@@ -31,6 +31,7 @@ RSS_URLS = [
     "https://www.androidauthority.com/news/feed/",
     "https://feeds.feedburner.com/Techcrunch"
 ]
+current_index = 0
 
 def send_scheduled_message(chat_id, text, schedule_date):
     if not TELEGRAM_TOKEN:
@@ -40,12 +41,14 @@ def send_scheduled_message(chat_id, text, schedule_date):
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
-        "schedule_date": int(schedule_date.timestamp())
+        "schedule_date": int(schedule_date.timestamp())  # Unix timestamp в секундах
     }
+    logger.info(f"Планируем пост на {schedule_date} (timestamp: {int(schedule_date.timestamp())})")
     response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
     if response.status_code != 200:
-        logger.error(f"Ошибка отправки: {response.text}")
+        logger.error(f"Ошибка планирования: {response.text}")
         return False
+    logger.info(f"Пост успешно запланирован: {response.json()}")
     return True
 
 def send_message(chat_id, text):
@@ -148,10 +151,30 @@ def fetch_news(chat_id):
         if send_scheduled_message(CHANNEL_ID, message, schedule_date):
             save_to_feedcache(title, summary, link, rss_url.split('/')[2])
             successful += 1
-        else:
-            logger.error(f"Не удалось запланировать пост для {link}")
     
     send_message(chat_id, f"Запланировано {successful} постов с интервалом 1 час")
+
+def post_latest_news(chat_id):
+    global current_index
+    rss_url = RSS_URLS[current_index]
+    feed = feedparser.parse(rss_url)
+    
+    if not feed.entries:
+        logger.warning(f"Нет записей в {rss_url}")
+        send_message(chat_id, f"Нет новостей в {rss_url}")
+        current_index = (current_index + 1) % len(RSS_URLS)
+        return
+    
+    latest_entry = feed.entries[0]
+    link = latest_entry.link
+    title, summary = get_article_content(link)
+    message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}"
+    
+    send_message(CHANNEL_ID, message)
+    save_to_feedcache(title, summary, link, rss_url.split('/')[2])
+    send_message(chat_id, f"Новость отправлена (источник: {rss_url.split('/')[2]})")
+    
+    current_index = (current_index + 1) % len(RSS_URLS)
 
 def get_feedcache(chat_id):
     if not os.path.exists(FEEDCACHE_FILE):
@@ -181,6 +204,8 @@ def webhook():
 
     if message_text == '/fetch':
         fetch_news(chat_id)
+    elif message_text == '/test':
+        post_latest_news(chat_id)
     elif message_text == '/feedcache':
         get_feedcache(chat_id)
     elif message_text == '/feedcacheclear':
