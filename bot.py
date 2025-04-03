@@ -172,6 +172,56 @@ def post_latest_news(chat_id):
         send_message(chat_id, "Не удалось найти новости в доступных RSS-лентах")
         logger.error("All RSS feeds returned empty entries")
 
-def get_feedcache(chat...
+def get_feedcache(chat_id):
+    if not os.path.exists(FEEDCACHE_FILE):
+        send_message(chat_id, "Feedcache пуст или ещё не создан")
+        return
+    
+    with open(FEEDCACHE_FILE, 'r', encoding='utf-8') as f:
+        try:
+            cache = json.load(f)
+            if not cache:
+                send_message(chat_id, "Feedcache пуст")
+                return
+            
+            # Если записей мало, выводим текстом
+            if len(str(cache)) < 4000:  # Telegram лимит ~4096 символов
+                text = "Содержимое feedcache:\n" + json.dumps(cache, ensure_ascii=False, indent=2)
+                send_message(chat_id, text)
+            else:
+                send_file(chat_id, FEEDCACHE_FILE)
+        except json.JSONDecodeError:
+            send_message(chat_id, "Ошибка чтения feedcache")
 
-Что-то пошло не так, повторите попытку.
+def clear_feedcache(chat_id):
+    if os.path.exists(FEEDCACHE_FILE):
+        os.remove(FEEDCACHE_FILE)
+        send_message(chat_id, "Feedcache очищен")
+        logger.info("Feedcache cleared")
+    else:
+        send_message(chat_id, "Feedcache ещё не создан, нечего чистить")
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    logger.info("Webhook triggered")
+    update = request.get_json()
+    logger.info(f"Received update: {json.dumps(update, ensure_ascii=False)[:200]}...")
+    
+    if 'message' not in update or 'message_id' not in update['message']:
+        logger.warning("No message or message_id in update, skipping")
+        return "OK", 200
+    
+    chat_id = update['message']['chat']['id']
+    message_text = update['message'].get('text', '')
+
+    if message_text == '/test':
+        post_latest_news(chat_id)
+    elif message_text == '/feedcache':
+        get_feedcache(chat_id)
+    elif message_text == '/feedcacheclear':
+        clear_feedcache(chat_id)
+    
+    return "OK", 200
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
