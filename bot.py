@@ -15,7 +15,6 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/" if TELEGRAM_TOKEN else None
 
-# Обновлённый список RSS-лент
 RSS_URLS = [
     "https://www.theverge.com/rss/index.xml",
     "https://www.windowscentral.com/feed",
@@ -104,19 +103,34 @@ def get_article_content(url):
 
 def post_latest_news(chat_id):
     global current_index
-    rss_url = RSS_URLS[current_index]
-    feed = feedparser.parse(rss_url)
-    latest_entry = feed.entries[0]
-    link = latest_entry.link
+    attempts = 0
+    max_attempts = len(RSS_URLS)
     
-    logger.info(f"Processing news from: {link} (source: {rss_url})")
-    title_ru, summary_ru = get_article_content(link)
-    message = f"<b>{title_ru}</b> <a href='{link}'>| Источник</a>\n{summary_ru}"
-    
-    send_message(CHANNEL_ID, message)
-    send_message(chat_id, f"Новость отправлена в @TechChronicleTest (источник: {rss_url.split('/')[2]})")
-    
-    current_index = (current_index + 1) % len(RSS_URLS)
+    while attempts < max_attempts:
+        rss_url = RSS_URLS[current_index]
+        feed = feedparser.parse(rss_url)
+        
+        if not feed.entries:
+            logger.warning(f"No entries found in RSS feed: {rss_url}")
+            current_index = (current_index + 1) % len(RSS_URLS)
+            attempts += 1
+            continue
+        
+        latest_entry = feed.entries[0]
+        link = latest_entry.link
+        
+        logger.info(f"Processing news from: {link} (source: {rss_url})")
+        title_ru, summary_ru = get_article_content(link)
+        message = f"<b>{title_ru}</b> <a href='{link}'>| Источник</a>\n{summary_ru}"
+        
+        send_message(CHANNEL_ID, message)
+        send_message(chat_id, f"Новость отправлена в @TechChronicleTest (источник: {rss_url.split('/')[2]})")
+        
+        current_index = (current_index + 1) % len(RSS_URLS)
+        break
+    else:
+        send_message(chat_id, "Не удалось найти новости в доступных RSS-лентах")
+        logger.error("All RSS feeds returned empty entries")
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
