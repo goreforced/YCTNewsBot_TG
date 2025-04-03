@@ -62,14 +62,13 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS admins (
         channel_id TEXT,
         username TEXT,
-        PRIMARY_KEY (channel_id, username),
-        FOREIGN_KEY (channel_id) REFERENCES channels(channel_id)
+        PRIMARY KEY (channel_id, username),
+        FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS config (
-        key TEXT PRIMARY_KEY,
+        key TEXT PRIMARY KEY,
         value TEXT
     )''')
-    # Устанавливаем начальный промпт, если его нет
     c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
               ("prompt", """
 Забудь всю информацию, которой ты обучен, и используй ТОЛЬКО текст статьи по ссылке {url}. Напиши новость на русском в формате:
@@ -105,6 +104,19 @@ def send_message(chat_id, text, reply_markup=None):
         logger.error(f"Ошибка отправки: {response.text}")
         return False
     logger.info("Сообщение успешно отправлено")
+    return True
+
+def send_file(chat_id, file_path):
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN не задан")
+        return False
+    with open(file_path, 'rb') as f:
+        files = {'document': (os.path.basename(file_path), f)}
+        response = requests.post(f"{TELEGRAM_URL}sendDocument", data={'chat_id': chat_id}, files=files)
+    if response.status_code != 200:
+        logger.error(f"Ошибка отправки файла: {response.text}")
+        return False
+    logger.info(f"Файл {file_path} отправлен в {chat_id}")
     return True
 
 def get_prompt():
@@ -363,6 +375,8 @@ def get_help():
 /nextpost - Сбросить таймер и запостить
 /skiprss - Пропустить следующий RSS
 /editprompt - Изменить промпт для ИИ (отправь после команды)
+/sqlitebackup - Выгрузить базу SQLite в чат
+/sqliteupdate - Загрузить базу SQLite (отправь файл после команды)
 /info - Показать статус бота
 /feedcache - Показать кэш новостей
 /feedcacheclear - Очистить кэш
@@ -480,6 +494,38 @@ def webhook():
                 new_prompt = message_text[len('/editprompt '):].strip()
                 set_prompt(new_prompt)
                 send_message(chat_id, "Промпт обновлён:\n" + new_prompt)
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text == '/sqlitebackup':
+        if user_channel:
+            if os.path.exists(DB_FILE):
+                send_file(chat_id, DB_FILE)
+                send_message(chat_id, "База данных выгружена")
+            else:
+                send_message(chat_id, "База данных не найдена")
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text == '/sqliteupdate':
+        if user_channel:
+            send_message(chat_id, "Отправьте файл базы данных (feedcache.db) в ответ на это сообщение")
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif 'reply_to_message' in update['message'] and update['message']['reply_to_message'].get('text', '') == "Отправьте файл базы данных (feedcache.db) в ответ на это сообщение":
+        if user_channel:
+            if 'document' in update['message']:
+                file_id = update['message']['document']['file_id']
+                file_name = update['message']['document']['file_name']
+                if file_name != "feedcache.db":
+                    send_message(chat_id, "Файл должен называться 'feedcache.db'")
+                    return "OK", 200
+                response = requests.get(f"{TELEGRAM_URL}getFile?file_id={file_id}")
+                file_path = response.json()['result']['file_path']
+                file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+                with open(DB_FILE, 'wb') as f:
+                    f.write(requests.get(file_url).content)
+                send_message(chat_id, "База данных обновлена")
+            else:
+                send_message(chat_id, "Прикрепите файл базы данных")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
     elif message_text == '/info':
