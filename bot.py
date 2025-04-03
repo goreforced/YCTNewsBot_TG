@@ -14,6 +14,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/" if TELEGRAM_TOKEN else None
 RSS_URL = "https://www.tomshardware.com/feeds/all"
+CHANNEL_ID = "@TechChronicleTest"  # Целевой канал
 
 def send_message(chat_id, text):
     if not TELEGRAM_TOKEN:
@@ -41,7 +42,7 @@ def get_article_content(url):
         "X-Title": "TChNewsBot"
     }
     data = {
-        "model": "meta-llama/llama-3.1-8b-instruct:free",
+        "model": "mistralai/mixtral-8x7b-instruct:free",
         "messages": [
             {
                 "role": "user",
@@ -91,7 +92,7 @@ def get_article_content(url):
         logger.error(f"Ошибка запроса: {str(e)}")
         return f"Ошибка: {str(e)}", f"Ошибка: {str(e)}"
 
-def get_latest_news(chat_id):
+def post_latest_news(chat_id):
     feed = feedparser.parse(RSS_URL)
     latest_entry = feed.entries[0]
     link = latest_entry.link
@@ -101,7 +102,8 @@ def get_latest_news(chat_id):
     full_title = f"{title_ru[:80]} <a href='{link}'>Источник</a>"
     message = f"<b>{full_title}</b>\n{summary_ru}"
     
-    send_message(chat_id, message)
+    send_message(CHANNEL_ID, message)  # Отправляем в канал
+    send_message(chat_id, "Новость отправлена в @TechChronicleTest")  # Уведомляем пользователя
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -114,7 +116,11 @@ def webhook():
         return "OK", 200
     
     chat_id = update['message']['chat']['id']
-    get_latest_news(chat_id)
+    message_text = update['message'].get('text', '')
+
+    if message_text == '/test':
+        post_latest_news(chat_id)
+    
     return "OK", 200
 
 if __name__ == "__main__":
