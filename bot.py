@@ -51,6 +51,17 @@ def send_message(chat_id, text, reply_markup=None):
         return False
     return True
 
+def send_file(chat_id, file_path):
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN не задан")
+        return
+    with open(file_path, 'rb') as f:
+        files = {'document': (file_path, f)}
+        payload = {"chat_id": chat_id}
+        response = requests.post(f"{TELEGRAM_URL}sendDocument", data=payload, files=files)
+    if response.status_code != 200:
+        logger.error(f"Ошибка отправки файла: {response.text}")
+
 def get_article_content(url):
     if not OPENROUTER_API_KEY:
         return "Ошибка: OPENROUTER_API_KEY не задан", "Ошибка: OPENROUTER_API_KEY не задан"
@@ -187,6 +198,24 @@ def post_latest_news(chat_id):
     
     current_index = (current_index + 1) % len(RSS_URLS)
 
+def get_feedcache(chat_id):
+    if not os.path.exists(FEEDCACHE_FILE):
+        send_message(chat_id, "Feedcache пуст")
+        return
+    with open(FEEDCACHE_FILE, 'r', encoding='utf-8') as f:
+        cache = json.load(f)
+        if len(str(cache)) < 4000:
+            send_message(chat_id, "Содержимое feedcache:\n" + json.dumps(cache, ensure_ascii=False, indent=2))
+        else:
+            send_file(chat_id, FEEDCACHE_FILE)
+
+def clear_feedcache(chat_id):
+    if os.path.exists(FEEDCACHE_FILE):
+        os.remove(FEEDCACHE_FILE)
+        send_message(chat_id, "Feedcache очищен")
+    else:
+        send_message(chat_id, "Feedcache пуст")
+
 def handle_callback(chat_id, callback_data, message_id):
     action, post_id = callback_data.split("_", 1)
     
@@ -205,8 +234,26 @@ def handle_callback(chat_id, callback_data, message_id):
         send_message(chat_id, "Пост отклонён")
         del PENDING_POSTS[chat_id][post_id]
     elif action == "edit":
-        send_message(chat_id, "Введите новый заголовок (оставьте пустым, если без изменений):")
+        send_message(chat_id, "Введите новый заголовок:", {
+            "inline_keyboard": [[{"text": "Без изменений", "callback_data": f"nochange_title_{post_id}"}]]
+        })
         PENDING_POSTS[chat_id][post_id]["state"] = "awaiting_title"
+    elif action == "nochange_title":
+        send_message(chat_id, "Введите новое содержание:", {
+            "inline_keyboard": [[{"text": "Без изменений", "callback_data": f"nochange_summary_{post_id}"}]]
+        })
+        PENDING_POSTS[chat_id][post_id]["state"] = "awaiting_summary"
+    elif action == "nochange_summary":
+        send_message(chat_id, post["text"], {
+            "inline_keyboard": [
+                [
+                    {"text": "Одобрить", "callback_data": f"approve_{post_id}"},
+                    {"text": "Редактировать", "callback_data": f"edit_{post_id}"},
+                    {"text": "Отклонить", "callback_data": f"reject_{post_id}"}
+                ]
+            ]
+        })
+        del PENDING_POSTS[chat_id][post_id]["state"]
 
     if not PENDING_POSTS[chat_id]:
         del PENDING_POSTS[chat_id]
@@ -222,19 +269,27 @@ def webhook():
             fetch_news(chat_id)
         elif message_text == '/test':
             post_latest_news(chat_id)
+        elif message_text == '/feedcache':
+            get_feedcache(chat_id)
+        elif message_text == '/feedcacheclear':
+            clear_feedcache(chat_id)
         elif chat_id in PENDING_POSTS:
             for post_id, post in PENDING_POSTS[chat_id].items():
                 if "state" in post:
                     if post["state"] == "awaiting_title":
-                        new_title = message_text.strip() or post["title"]
-                        post["title"] = new_title
-                        post["text"] = f"<b>{new_title}</b> <a href='{post['link']}'>| Источник</a>\n{post['summary']}"
-                        send_message(chat_id, "Введите новое содержание (оставьте пустым, если без изменений):")
+                        new_title = message_text.strip()
+                        if new_title:
+                            post["title"] = new_title
+                            post["text"] = f"<b>{new_title}</b> <a href='{post['link']}'>| Источник</a>\n{post['summary']}"
+                        send_message(chat_id, "Введите новое содержание:", {
+                            "inline_keyboard": [[{"text": "Без изменений", "callback_data": f"nochange_summary_{post_id}"}]]
+                        })
                         post["state"] = "awaiting_summary"
                     elif post["state"] == "awaiting_summary":
-                        new_summary = message_text.strip() or post["summary"]
-                        post["summary"] = new_summary
-                        post["text"] = f"<b>{post['title']}</b> <a href='{post['link']}'>| Источник</a>\n{new_summary}"
+                        new_summary = message_text.strip()
+                        if new_summary:
+                            post["summary"] = new_summary
+                            post["text"] = f"<b>{post['title']}</b> <a href='{post['link']}'>| Источник</a>\n{new_summary}"
                         send_message(chat_id, post["text"], {
                             "inline_keyboard": [
                                 [
