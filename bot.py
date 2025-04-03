@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -31,39 +31,46 @@ RSS_URLS = [
     "https://www.androidauthority.com/news/feed/",
     "https://feeds.feedburner.com/Techcrunch"
 ]
-current_index = 0
 
-def send_message(chat_id, text):
+def send_scheduled_message(chat_id, text, schedule_date):
     if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN не задан в переменных окружения")
-        return
-    
+        logger.error("TELEGRAM_TOKEN не задан")
+        return False
     payload = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "HTML"
+        "parse_mode": "HTML",
+        "schedule_date": int(schedule_date.timestamp())
     }
-    logger.info(f"Sending message to chat_id {chat_id}: {text[:50]}...")
     response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
     if response.status_code != 200:
-        logger.error(f"Failed to send message: {response.text}")
+        logger.error(f"Ошибка отправки: {response.text}")
+        return False
+    return True
+
+def send_message(chat_id, text):
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN не задан")
+        return
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
+    if response.status_code != 200:
+        logger.error(f"Ошибка отправки: {response.text}")
 
 def send_file(chat_id, file_path):
     if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN не задан в переменных окружения")
+        logger.error("TELEGRAM_TOKEN не задан")
         return
-    
     with open(file_path, 'rb') as f:
         files = {'document': (file_path, f)}
         payload = {"chat_id": chat_id}
         response = requests.post(f"{TELEGRAM_URL}sendDocument", data=payload, files=files)
     if response.status_code != 200:
-        logger.error(f"Failed to send file: {response.text}")
+        logger.error(f"Ошибка отправки файла: {response.text}")
 
 def get_article_content(url):
     if not OPENROUTER_API_KEY:
         return "Ошибка: OPENROUTER_API_KEY не задан", "Ошибка: OPENROUTER_API_KEY не задан"
-    
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -72,10 +79,7 @@ def get_article_content(url):
     }
     data = {
         "model": "google/gemma-2-9b-it:free",
-        "messages": [
-            {
-                "role": "user",
-                "content": f"""
+        "messages": [{"role": "user", "content": f"""
 По ссылке {url} напиши новость на русском в следующем формате:
 Заголовок в стиле новостного канала
 Основная суть новости в 1-2 предложениях из статьи.
@@ -86,33 +90,20 @@ def get_article_content(url):
 - Не добавляй "| Источник", названия сайтов или эмодзи.
 - Не используй форматирование вроде ##, ** или [].
 - Максимальная длина пересказа — 500 символов.
-"""
-            }
-        ]
+"""}]
     }
     try:
-        logger.info(f"Requesting content for URL: {url}")
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            data=json.dumps(data),
-            timeout=15
-        )
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, data=json.dumps(data), timeout=15)
         response.raise_for_status()
         result = response.json()
-        logger.info(f"Content response: {json.dumps(result, ensure_ascii=False)}")
-        
-        if "choices" in result and len(result["choices"]) > 0:
+        if "choices" in result and result["choices"]:
             content = result["choices"][0]["message"]["content"].strip()
             if "\n" in content:
                 title, summary = content.split("\n", 1)
                 return title, summary[:500]
             return content[:80], "Пересказ не получен"
         return "Ошибка: Нет ответа от API", "Ошибка: Нет ответа от API"
-    except requests.exceptions.Timeout:
-        logger.error("Таймаут при запросе")
-        return "Ошибка: Таймаут", "Ошибка: Таймаут"
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         logger.error(f"Ошибка запроса: {str(e)}")
         return f"Ошибка: {str(e)}", f"Ошибка: {str(e)}"
 
@@ -125,97 +116,71 @@ def save_to_feedcache(title, summary, link, source):
         "source": source,
         "timestamp": datetime.now().isoformat()
     }
-    
+    cache = []
     if os.path.exists(FEEDCACHE_FILE):
         with open(FEEDCACHE_FILE, 'r', encoding='utf-8') as f:
             try:
                 cache = json.load(f)
             except json.JSONDecodeError:
                 cache = []
-    else:
-        cache = []
-    
     cache.append(entry)
     with open(FEEDCACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
-    logger.info(f"Saved to feedcache: {entry['id']}")
+    logger.info(f"Сохранено в feedcache: {entry['id']}")
 
-def post_latest_news(chat_id):
-    global current_index
-    attempts = 0
-    max_attempts = len(RSS_URLS)
+def fetch_news(chat_id):
+    start_time = datetime.now() + timedelta(minutes=5)  # Начинаем через 5 минут
+    interval = timedelta(hours=1)  # Интервал 1 час
+    successful = 0
     
-    while attempts < max_attempts:
-        rss_url = RSS_URLS[current_index]
+    for i, rss_url in enumerate(RSS_URLS):
         feed = feedparser.parse(rss_url)
-        
         if not feed.entries:
-            logger.warning(f"No entries found in RSS feed: {rss_url}")
-            current_index = (current_index + 1) % len(RSS_URLS)
-            attempts += 1
+            logger.warning(f"Нет записей в {rss_url}")
             continue
         
         latest_entry = feed.entries[0]
         link = latest_entry.link
+        title, summary = get_article_content(link)
+        message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}"
         
-        logger.info(f"Processing news from: {link} (source: {rss_url})")
-        title_ru, summary_ru = get_article_content(link)
-        message = f"<b>{title_ru}</b> <a href='{link}'>| Источник</a>\n{summary_ru}"
-        
-        send_message(CHANNEL_ID, message)
-        send_message(chat_id, f"Новость отправлена в @TechChronicleTest (источник: {rss_url.split('/')[2]})")
-        save_to_feedcache(title_ru, summary_ru, link, rss_url.split('/')[2])
-        
-        current_index = (current_index + 1) % len(RSS_URLS)
-        break
-    else:
-        send_message(chat_id, "Не удалось найти новости в доступных RSS-лентах")
-        logger.error("All RSS feeds returned empty entries")
+        schedule_date = start_time + (i * interval)
+        if send_scheduled_message(CHANNEL_ID, message, schedule_date):
+            save_to_feedcache(title, summary, link, rss_url.split('/')[2])
+            successful += 1
+        else:
+            logger.error(f"Не удалось запланировать пост для {link}")
+    
+    send_message(chat_id, f"Запланировано {successful} постов с интервалом 1 час")
 
 def get_feedcache(chat_id):
     if not os.path.exists(FEEDCACHE_FILE):
-        send_message(chat_id, "Feedcache пуст или ещё не создан")
+        send_message(chat_id, "Feedcache пуст")
         return
-    
     with open(FEEDCACHE_FILE, 'r', encoding='utf-8') as f:
-        try:
-            cache = json.load(f)
-            if not cache:
-                send_message(chat_id, "Feedcache пуст")
-                return
-            
-            # Если записей мало, выводим текстом
-            if len(str(cache)) < 4000:  # Telegram лимит ~4096 символов
-                text = "Содержимое feedcache:\n" + json.dumps(cache, ensure_ascii=False, indent=2)
-                send_message(chat_id, text)
-            else:
-                send_file(chat_id, FEEDCACHE_FILE)
-        except json.JSONDecodeError:
-            send_message(chat_id, "Ошибка чтения feedcache")
+        cache = json.load(f)
+        if len(str(cache)) < 4000:
+            send_message(chat_id, "Содержимое feedcache:\n" + json.dumps(cache, ensure_ascii=False, indent=2))
+        else:
+            send_file(chat_id, FEEDCACHE_FILE)
 
 def clear_feedcache(chat_id):
     if os.path.exists(FEEDCACHE_FILE):
         os.remove(FEEDCACHE_FILE)
         send_message(chat_id, "Feedcache очищен")
-        logger.info("Feedcache cleared")
     else:
-        send_message(chat_id, "Feedcache ещё не создан, нечего чистить")
+        send_message(chat_id, "Feedcache пуст")
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    logger.info("Webhook triggered")
     update = request.get_json()
-    logger.info(f"Received update: {json.dumps(update, ensure_ascii=False)[:200]}...")
-    
     if 'message' not in update or 'message_id' not in update['message']:
-        logger.warning("No message or message_id in update, skipping")
         return "OK", 200
-    
     chat_id = update['message']['chat']['id']
     message_text = update['message'].get('text', '')
 
-    if message_text == '/test':
-        post_latest_news(chat_id)
+    if message_text == '/fetch':
+        fetch_news(chat_id)
     elif message_text == '/feedcache':
         get_feedcache(chat_id)
     elif message_text == '/feedcacheclear':
