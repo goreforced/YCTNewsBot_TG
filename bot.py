@@ -124,7 +124,7 @@ def save_to_feedcache(title, summary, link, source):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     entry = (
-        hashlib.md5(link.encode()).hexdigest(),
+        hashlib.md5((link + title).encode()).hexdigest(),  # Хэш от URL + заголовка
         title,
         summary,
         link,
@@ -136,11 +136,11 @@ def save_to_feedcache(title, summary, link, source):
     conn.close()
     logger.info(f"Сохранено в feedcache: {entry[0]}")
 
-def check_duplicate(link):
+def check_duplicate(link, title):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    link_hash = hashlib.md5(link.encode()).hexdigest()
-    c.execute("SELECT id FROM feedcache WHERE id = ?", (link_hash,))
+    link_title_hash = hashlib.md5((link + title).encode()).hexdigest()
+    c.execute("SELECT id FROM feedcache WHERE id = ?", (link_title_hash,))
     result = c.fetchone()
     conn.close()
     return result is not None
@@ -193,21 +193,20 @@ def post_news():
         else:
             latest_entry = feed.entries[0]
             link = latest_entry.link
-            if not check_duplicate(link):
-                title, summary = get_article_content(link)
-                if "Ошибка" in title:
-                    error_count += 1
-                else:
-                    message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}\n\n<i>Пост сгенерирован ИИ</i>"
-                    for username, channel_id in users:
-                        if can_post_to_channel(channel_id):
-                            send_message(channel_id, message)
-                            save_to_feedcache(title, summary, link, rss_url.split('/')[2])
-                            post_count += 1
-                            last_post_time = time.time()
-                        else:
-                            error_count += 1
-                            logger.error(f"Нет прав для постинга в {channel_id}")
+            title, summary = get_article_content(link)
+            if "Ошибка" in title:
+                error_count += 1
+            elif not check_duplicate(link, title):
+                message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}\n\n<i>Пост сгенерирован ИИ</i>"
+                for username, channel_id in users:
+                    if can_post_to_channel(channel_id):
+                        send_message(channel_id, message)
+                        save_to_feedcache(title, summary, link, rss_url.split('/')[2])
+                        post_count += 1
+                        last_post_time = time.time()
+                    else:
+                        error_count += 1
+                        logger.error(f"Нет прав для постинга в {channel_id}")
 
         current_index = (current_index + 1) % len(RSS_URLS)
         time.sleep(3600)  # Ждём час
