@@ -6,7 +6,9 @@ import logging
 import os
 import hashlib
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
+import threading
+import time
 
 app = Flask(__name__)
 
@@ -15,10 +17,8 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/" if TELEGRAM_TOKEN else None
-DB_FILE = "feedcache.db"  # SQLite вместо JSON
-PENDING_POSTS = {}  # Временное хранилище для постов на утверждение
+DB_FILE = "feedcache.db"
 
 RSS_URLS = [
     "https://www.theverge.com/rss/index.xml",
@@ -33,7 +33,15 @@ RSS_URLS = [
     "https://www.androidauthority.com/news/feed/",
     "https://feeds.feedburner.com/Techcrunch"
 ]
+
+# Глобальные переменные для управления постингом и статуса
 current_index = 0
+posting_active = False
+posting_thread = None
+start_time = None
+post_count = 0
+error_count = 0
+last_post_time = None
 
 # Инициализация SQLite
 def init_db():
@@ -46,6 +54,10 @@ def init_db():
         link TEXT,
         source TEXT,
         timestamp TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY,
+        channel_id TEXT
     )''')
     conn.commit()
     conn.close()
@@ -69,18 +81,7 @@ def send_message(chat_id, text, reply_markup=None):
         return False
     return True
 
-def send_file(chat_id, file_path):
-    if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN не задан")
-        return
-    with open(file_path, 'rb') as f:
-        files = {'document': (file_path, f)}
-        payload = {"chat_id": chat_id}
-        response = requests.post(f"{TELEGRAM_URL}sendDocument", data=payload, files=files)
-    if response.status_code != 200:
-        logger.error(f"Ошибка отправки файла: {response.text}")
-
-def get_article_content(url, user_instructions=None):
+def get_article_content(url):
     if not OPENROUTER_API_KEY:
         return "Ошибка: OPENROUTER_API_KEY не задан", "Ошибка: OPENROUTER_API_KEY не задан"
     headers = {
@@ -89,30 +90,16 @@ def get_article_content(url, user_instructions=None):
         "HTTP-Referer": "https://t.me/Tech_Chronicle",
         "X-Title": "TChNewsBot"
     }
-    if user_instructions:
-        prompt = f"""
-По ссылке {url} есть новость. Пользователь просит пересказать с дополнениями: "{user_instructions}".
-Напиши новый вариант в формате:
+    prompt = f"""
+По ссылке {url} напиши новость на русском в формате:
 Заголовок в стиле новостного канала
 Основная суть новости в 1-2 предложениях из статьи.
 
 Требования:
-- Бери данные только из статьи.
-- Учти инструкции пользователя.
-- Максимальная длина пересказа — 500 символов.
-"""
-    else:
-        prompt = f"""
-По ссылке {url} напиши новость на русском в следующем формате:
-Заголовок в стиле новостного канала
-Основная суть новости в 1-2 предложениях из статьи.
-
-Требования:
-- Бери данные только из статьи, ничего не придумывай.
-- Внимательно проверяй даты и числа в статье, не путай их.
-- Не добавляй "| Источник", названия сайтов или эмодзи.
-- Не используй форматирование вроде ##, ** или [].
-- Максимальная длина пересказа — 500 символов.
+- Используй только данные из статьи, ничего не придумывай.
+- Не добавляй лишние символы (##, **, [], эмодзи).
+- Если данных недостаточно, напиши "Недостаточно данных для пересказа".
+- Максимальная длина — 500 символов, обрезай аккуратно.
 """
     data = {
         "model": "google/gemma-2-9b-it:free",
@@ -126,12 +113,12 @@ def get_article_content(url, user_instructions=None):
             content = result["choices"][0]["message"]["content"].strip()
             if "\n" in content:
                 title, summary = content.split("\n", 1)
-                return title, summary[:500]
+                return title[:80], summary[:500]
             return content[:80], "Пересказ не получен"
         return "Ошибка: Нет ответа от API", "Ошибка: Нет ответа от API"
     except Exception as e:
         logger.error(f"Ошибка запроса: {str(e)}")
-        return f"Ошибка: {str(e)}", f"Ошибка: {str(e)}"
+        return "Ошибка: Не удалось обработать новость", "Ошибка: Не удалось обработать новость"
 
 def save_to_feedcache(title, summary, link, source):
     conn = sqlite3.connect(DB_FILE)
@@ -158,163 +145,115 @@ def check_duplicate(link):
     conn.close()
     return result is not None
 
-def fetch_news(chat_id):
-    posts = []
-    for rss_url in RSS_URLS:
-        feed = feedparser.parse(rss_url)
-        if not feed.entries:
-            logger.warning(f"Нет записей в {rss_url}")
-            continue
-        
-        latest_entry = feed.entries[0]
-        link = latest_entry.link
-        if check_duplicate(link):
-            logger.info(f"Дубль пропущен: {link}")
-            continue
-        
-        title, summary = get_article_content(link)
-        message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}"
-        posts.append({"text": message, "link": link, "source": rss_url.split('/')[2], "title": title, "summary": summary})
-        if len(posts) >= 2:
-            break
-    
-    if not posts:
-        send_message(chat_id, "Нет новых новостей для обработки")
-        return
-    
-    PENDING_POSTS[chat_id] = {}
-    for i, post in enumerate(posts):
-        post_id = f"{chat_id}_{i}"
-        PENDING_POSTS[chat_id][post_id] = post
-        reply_markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "Одобрить", "callback_data": f"approve_{post_id}"},
-                    {"text": "Редактировать", "callback_data": f"edit_{post_id}"},
-                    {"text": "Пересказ", "callback_data": f"rewrite_{post_id}"},
-                    {"text": "Отклонить", "callback_data": f"reject_{post_id}"}
-                ]
-            ]
-        }
-        send_message(chat_id, post["text"], reply_markup)
-    
-    send_message(chat_id, "Оцени предложенные посты выше")
-
-def post_latest_news(chat_id):
-    global current_index
-    rss_url = RSS_URLS[current_index]
-    feed = feedparser.parse(rss_url)
-    
-    if not feed.entries:
-        logger.warning(f"Нет записей в {rss_url}")
-        send_message(chat_id, f"Нет новостей в {rss_url}")
-        current_index = (current_index + 1) % len(RSS_URLS)
-        return
-    
-    latest_entry = feed.entries[0]
-    link = latest_entry.link
-    if check_duplicate(link):
-        send_message(chat_id, "Новость уже публиковалась")
-        current_index = (current_index + 1) % len(RSS_URLS)
-        return
-    
-    title, summary = get_article_content(link)
-    message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}"
-    
-    send_message(CHANNEL_ID, message)
-    save_to_feedcache(title, summary, link, rss_url.split('/')[2])
-    send_message(chat_id, f"Новость отправлена (источник: {rss_url.split('/')[2]})")
-    
-    current_index = (current_index + 1) % len(RSS_URLS)
-
-def get_feedcache(chat_id):
+def get_user_channel(username):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT * FROM feedcache")
-    rows = c.fetchall()
+    c.execute("SELECT channel_id FROM users WHERE username = ?", (username,))
+    result = c.fetchone()
     conn.close()
-    if not rows:
-        send_message(chat_id, "Feedcache пуст")
-        return
-    cache = [dict(zip(["id", "title", "summary", "link", "source", "timestamp"], row)) for row in rows]
-    if len(str(cache)) < 4000:
-        send_message(chat_id, "Содержимое feedcache:\n" + json.dumps(cache, ensure_ascii=False, indent=2))
-    else:
-        with open("feedcache_temp.json", 'w', encoding='utf-8') as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-        send_file(chat_id, "feedcache_temp.json")
-        os.remove("feedcache_temp.json")
+    return result[0] if result else None
 
-def clear_feedcache(chat_id):
+def save_user_channel(username, channel_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("DELETE FROM feedcache")
+    c.execute("INSERT OR REPLACE INTO users (username, channel_id) VALUES (?, ?)", (username, channel_id))
     conn.commit()
     conn.close()
-    send_message(chat_id, "Feedcache очищен")
 
-def handle_callback(chat_id, callback_data, message_id):
-    action, post_id = callback_data.split("_", 1)
-    
-    if chat_id not in PENDING_POSTS or post_id not in PENDING_POSTS[chat_id]:
-        send_message(chat_id, "Пост не найден")
-        return
-    
-    post = PENDING_POSTS[chat_id][post_id]
-    
-    if action == "approve":
-        send_message(CHANNEL_ID, post["text"])
-        save_to_feedcache(post["title"], post["summary"], post["link"], post["source"])
-        send_message(chat_id, "Пост одобрен и опубликован")
-        del PENDING_POSTS[chat_id][post_id]
-    elif action == "reject":
-        send_message(chat_id, "Пост отклонён")
-        del PENDING_POSTS[chat_id][post_id]
-    elif action == "edit":
-        send_message(chat_id, "Введите новый заголовок:", {
-            "inline_keyboard": [[{"text": "Без изменений", "callback_data": f"nochange_title_{post_id}"}]]
-        })
-        PENDING_POSTS[chat_id][post_id]["state"] = "awaiting_title"
-    elif action == "rewrite":
-        send_message(chat_id, "Введите инструкции для пересказа (например, 'Сделай короче' или 'Добавь деталей'):", {
-            "inline_keyboard": [[{"text": "Без изменений", "callback_data": f"nochange_rewrite_{post_id}"}]]
-        })
-        PENDING_POSTS[chat_id][post_id]["state"] = "awaiting_rewrite"
-    elif action == "nochange_title":
-        send_message(chat_id, "Введите новое содержание:", {
-            "inline_keyboard": [[{"text": "Без изменений", "callback_data": f"nochange_summary_{post_id}"}]]
-        })
-        PENDING_POSTS[chat_id][post_id]["state"] = "awaiting_summary"
-    elif action == "nochange_summary":
-        send_message(chat_id, post["text"], {
-            "inline_keyboard": [
-                [
-                    {"text": "Одобрить", "callback_data": f"approve_{post_id}"},
-                    {"text": "Редактировать", "callback_data": f"edit_{post_id}"},
-                    {"text": "Пересказ", "callback_data": f"rewrite_{post_id}"},
-                    {"text": "Отклонить", "callback_data": f"reject_{post_id}"}
-                ]
-            ]
-        })
-        del PENDING_POSTS[chat_id][post_id]["state"]
-    elif action == "nochange_rewrite":
-        title, summary = get_article_content(post["link"])  # Повторный пересказ без изменений
-        post["title"], post["summary"] = title, summary
-        post["text"] = f"<b>{title}</b> <a href='{post['link']}'>| Источник</a>\n{summary}"
-        send_message(chat_id, post["text"], {
-            "inline_keyboard": [
-                [
-                    {"text": "Одобрить", "callback_data": f"approve_{post_id}"},
-                    {"text": "Редактировать", "callback_data": f"edit_{post_id}"},
-                    {"text": "Пересказ", "callback_data": f"rewrite_{post_id}"},
-                    {"text": "Отклонить", "callback_data": f"reject_{post_id}"}
-                ]
-            ]
-        })
-        del PENDING_POSTS[chat_id][post_id]["state"]
+def can_post_to_channel(channel_id):
+    response = requests.get(f"{TELEGRAM_URL}getChatMember", params={
+        "chat_id": channel_id,
+        "user_id": requests.get(f"{TELEGRAM_URL}getMe").json()["result"]["id"]
+    })
+    if response.status_code == 200:
+        status = response.json()["result"]["status"]
+        return status in ["administrator", "creator"]
+    return False
 
-    if not PENDING_POSTS[chat_id]:
-        del PENDING_POSTS[chat_id]
+def post_news():
+    global current_index, posting_active, post_count, error_count, last_post_time
+    while posting_active:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT username, channel_id FROM users")
+        users = c.fetchall()
+        conn.close()
+
+        if not users:
+            logger.info("Нет пользователей с каналами")
+            time.sleep(3600)
+            continue
+
+        rss_url = RSS_URLS[current_index]
+        feed = feedparser.parse(rss_url)
+
+        if not feed.entries:
+            logger.warning(f"Нет записей в {rss_url}")
+            error_count += 1
+        else:
+            latest_entry = feed.entries[0]
+            link = latest_entry.link
+            if not check_duplicate(link):
+                title, summary = get_article_content(link)
+                if "Ошибка" in title:
+                    error_count += 1
+                else:
+                    message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}"
+                    for username, channel_id in users:
+                        if can_post_to_channel(channel_id):
+                            send_message(channel_id, message)
+                            save_to_feedcache(title, summary, link, rss_url.split('/')[2])
+                            post_count += 1
+                            last_post_time = time.time()
+                        else:
+                            error_count += 1
+                            logger.error(f"Нет прав для постинга в {channel_id}")
+
+        current_index = (current_index + 1) % len(RSS_URLS)
+        time.sleep(3600)  # Ждём час
+
+def start_posting_thread():
+    global posting_thread, posting_active, start_time
+    if posting_thread is None or not posting_thread.is_alive():
+        posting_active = True
+        start_time = time.time()
+        posting_thread = threading.Thread(target=post_news)
+        posting_thread.start()
+        logger.info("Постинг запущен")
+
+def stop_posting_thread():
+    global posting_active, posting_thread
+    posting_active = False
+    if posting_thread:
+        posting_thread.join()
+        posting_thread = None
+    logger.info("Постинг остановлен")
+
+def get_status():
+    uptime = timedelta(seconds=int(time.time() - start_time)) if start_time else "Не запущен"
+    next_post = "Не активно"
+    if posting_active and last_post_time:
+        time_since_last = time.time() - last_post_time
+        time_to_next = 3600 - (time_since_last % 3600)
+        next_post = f"{int(time_to_next // 60)} мин {int(time_to_next % 60)} сек"
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT username, channel_id FROM users")
+    users = c.fetchall()
+    conn.close()
+    channels = ", ".join([f"{channel_id} (@{username})" for username, channel_id in users]) if users else "Не привязан"
+    return f"""
+Статус бота:
+Канал: {channels}
+Время до следующего поста: {next_post}
+Запощенных постов: {post_count}
+Аптайм: {uptime}
+Ошибок: {error_count}
+"""
+
+@app.route('/ping', methods=['GET'])
+def ping():
+    return "OK", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -322,67 +261,68 @@ def webhook():
     if 'message' in update and 'message_id' in update['message']:
         chat_id = update['message']['chat']['id']
         message_text = update['message'].get('text', '')
-        
-        if message_text == '/fetch':
-            fetch_news(chat_id)
-        elif message_text == '/test':
-            post_latest_news(chat_id)
+        username = update['message']['from'].get('username', None)
+
+        if not username:
+            send_message(chat_id, "У вас нет username. Установите его в настройках Telegram.")
+            return "OK", 200
+
+        user_channel = get_user_channel(username)
+
+        if message_text == '/start':
+            if user_channel:
+                send_message(chat_id, f"Канал {user_channel} уже привязан. Используйте /startposting для начала.")
+            else:
+                send_message(chat_id, "Укажите ID канала для постинга (например, @channelname или -1001234567890):")
+        elif message_text.startswith('@') or message_text.startswith('-100'):
+            channel_id = message_text
+            if can_post_to_channel(channel_id):
+                save_user_channel(username, channel_id)
+                send_message(chat_id, f"Канал {channel_id} привязан. Используйте /startposting для начала.")
+            else:
+                send_message(chat_id, "Бот не имеет прав администратора в этом канале.")
+        elif message_text == '/startposting':
+            if user_channel:
+                start_posting_thread()
+                send_message(chat_id, f"Постинг начат в {user_channel}")
+            else:
+                send_message(chat_id, "Сначала привяжите канал с помощью /start")
+        elif message_text == '/stopposting':
+            if user_channel:
+                stop_posting_thread()
+                send_message(chat_id, "Постинг остановлен")
+            else:
+                send_message(chat_id, "Сначала привяжите канал с помощью /start")
+        elif message_text == '/info':
+            if user_channel:
+                send_message(chat_id, get_status())
+            else:
+                send_message(chat_id, "Сначала привяжите канал с помощью /start")
         elif message_text == '/feedcache':
-            get_feedcache(chat_id)
+            if user_channel:
+                conn = sqlite3.connect(DB_FILE)
+                c = conn.cursor()
+                c.execute("SELECT * FROM feedcache")
+                rows = c.fetchall()
+                conn.close()
+                if not rows:
+                    send_message(chat_id, "Feedcache пуст")
+                else:
+                    cache = [dict(zip(["id", "title", "summary", "link", "source", "timestamp"], row)) for row in rows]
+                    send_message(chat_id, "Содержимое feedcache:\n" + json.dumps(cache, ensure_ascii=False, indent=2)[:4096])
+            else:
+                send_message(chat_id, "Сначала привяжите канал с помощью /start")
         elif message_text == '/feedcacheclear':
-            clear_feedcache(chat_id)
-        elif chat_id in PENDING_POSTS:
-            for post_id, post in PENDING_POSTS[chat_id].items():
-                if "state" in post:
-                    if post["state"] == "awaiting_title":
-                        new_title = message_text.strip()
-                        if new_title:
-                            post["title"] = new_title
-                            post["text"] = f"<b>{new_title}</b> <a href='{post['link']}'>| Источник</a>\n{post['summary']}"
-                        send_message(chat_id, "Введите новое содержание:", {
-                            "inline_keyboard": [[{"text": "Без изменений", "callback_data": f"nochange_summary_{post_id}"}]]
-                        })
-                        post["state"] = "awaiting_summary"
-                    elif post["state"] == "awaiting_summary":
-                        new_summary = message_text.strip()
-                        if new_summary:
-                            post["summary"] = new_summary
-                            post["text"] = f"<b>{post['title']}</b> <a href='{post['link']}'>| Источник</a>\n{new_summary}"
-                        send_message(chat_id, post["text"], {
-                            "inline_keyboard": [
-                                [
-                                    {"text": "Одобрить", "callback_data": f"approve_{post_id}"},
-                                    {"text": "Редактировать", "callback_data": f"edit_{post_id}"},
-                                    {"text": "Пересказ", "callback_data": f"rewrite_{post_id}"},
-                                    {"text": "Отклонить", "callback_data": f"reject_{post_id}"}
-                                ]
-                            ]
-                        })
-                        del post["state"]
-                    elif post["state"] == "awaiting_rewrite":
-                        new_title, new_summary = get_article_content(post["link"], message_text.strip())
-                        post["title"], post["summary"] = new_title, new_summary
-                        post["text"] = f"<b>{new_title}</b> <a href='{post['link']}'>| Источник</a>\n{new_summary}"
-                        send_message(chat_id, post["text"], {
-                            "inline_keyboard": [
-                                [
-                                    {"text": "Одобрить", "callback_data": f"approve_{post_id}"},
-                                    {"text": "Редактировать", "callback_data": f"edit_{post_id}"},
-                                    {"text": "Пересказ", "callback_data": f"rewrite_{post_id}"},
-                                    {"text": "Отклонить", "callback_data": f"reject_{post_id}"}
-                                ]
-                            ]
-                        })
-                        del post["state"]
-    
-    elif 'callback_query' in update:
-        callback = update['callback_query']
-        chat_id = callback['message']['chat']['id']
-        callback_data = callback['data']
-        message_id = callback['message']['message_id']
-        handle_callback(chat_id, callback_data, message_id)
-        requests.post(f"{TELEGRAM_URL}answerCallbackQuery", json={"callback_query_id": callback['id']})
-    
+            if user_channel:
+                conn = sqlite3.connect(DB_FILE)
+                c = conn.cursor()
+                c.execute("DELETE FROM feedcache")
+                conn.commit()
+                conn.close()
+                send_message(chat_id, "Feedcache очищен")
+            else:
+                send_message(chat_id, "Сначала привяжите канал с помощью /start")
+
     return "OK", 200
 
 if __name__ == "__main__":
