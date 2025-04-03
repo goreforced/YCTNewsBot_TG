@@ -56,13 +56,13 @@ def get_article_content(url):
                 "role": "user",
                 "content": f"""
 По ссылке {url} напиши новость на русском в следующем формате:
-Заголовок (до 80 символов) в стиле новостного канала
+Заголовок в стиле новостного канала
 Основная суть новости в 1-2 предложениях из статьи.
 
 Требования:
 - Бери данные только из статьи, ничего не придумывай.
-- Внимательно проверяй даты в статье, не путай их.
-- Не добавляй "| Источник" или названия сайтов, это сделаю я.
+- Внимательно проверяй даты и числа в статье, не путай их.
+- Не добавляй "| Источник", названия сайтов или эмодзи.
 - Не используй форматирование вроде ##, ** или [].
 - Максимальная длина пересказа — 500 символов.
 """
@@ -85,7 +85,7 @@ def get_article_content(url):
             content = result["choices"][0]["message"]["content"].strip()
             if "\n" in content:
                 title, summary = content.split("\n", 1)
-                return title.strip()[:80], summary.strip()[:500]
+                return title, summary[:500]  # Ограничение только для пересказа
             return content[:80], "Пересказ не получен"
         return "Ошибка: Нет ответа от API", "Ошибка: Нет ответа от API"
     except requests.exceptions.Timeout:
@@ -104,7 +104,7 @@ def post_latest_news(chat_id):
     
     logger.info(f"Processing news from: {link} (source: {rss_url})")
     title_ru, summary_ru = get_article_content(link)
-    message = f"<b>{title_ru[:80]}</b> <a href='{link}'>| Источник</a>\n{summary_ru}"
+    message = f"<b>{title_ru}</b> <a href='{link}'>| Источник</a>\n{summary_ru}"
     
     send_message(CHANNEL_ID, message)
     send_message(chat_id, f"Новость отправлена в @TechChronicleTest (источник: {rss_url.split('/')[2]})")
