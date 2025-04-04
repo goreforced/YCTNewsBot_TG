@@ -167,7 +167,7 @@ def save_to_feedcache(title, summary, link, source):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     entry = (
-        hashlib.md5((link + title).encode()).hexdigest(),
+        hashlib.md5(link.encode()).hexdigest(),  # Хэш только от link
         title,
         summary,
         link,
@@ -179,11 +179,11 @@ def save_to_feedcache(title, summary, link, source):
     conn.close()
     logger.info(f"Сохранено в feedcache: {entry[0]}")
 
-def check_duplicate(link, title):
+def check_duplicate(link):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    link_title_hash = hashlib.md5((link + title).encode()).hexdigest()
-    c.execute("SELECT id FROM feedcache WHERE id = ?", (link_title_hash,))
+    link_hash = hashlib.md5(link.encode()).hexdigest()  # Хэш только от link
+    c.execute("SELECT id FROM feedcache WHERE id = ?", (link_hash,))
     result = c.fetchone()
     conn.close()
     return result is not None
@@ -294,20 +294,23 @@ def post_news():
         else:
             latest_entry = feed.entries[0]
             link = latest_entry.link
-            title, summary = get_article_content(link)
-            if "Ошибка" in title:
-                error_count += 1
-            elif not check_duplicate(link, title):
-                message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}\n\n<i>Пост сгенерирован ИИ</i>"
-                for (channel_id,) in channels:
-                    if can_post_to_channel(channel_id):
-                        send_message(channel_id, message)
-                        save_to_feedcache(title, summary, link, rss_url.split('/')[2])
-                        post_count += 1
-                        last_post_time = time.time()
-                    else:
-                        error_count += 1
-                        logger.error(f"Нет прав для постинга в {channel_id}")
+            if not check_duplicate(link):  # Проверка только по link
+                title, summary = get_article_content(link)
+                if "Ошибка" in title:
+                    error_count += 1
+                else:
+                    message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}\n\n<i>Пост сгенерирован ИИ</i>"
+                    for (channel_id,) in channels:
+                        if can_post_to_channel(channel_id):
+                            send_message(channel_id, message)
+                            save_to_feedcache(title, summary, link, rss_url.split('/')[2])
+                            post_count += 1
+                            last_post_time = time.time()
+                        else:
+                            error_count += 1
+                            logger.error(f"Нет прав для постинга в {channel_id}")
+            else:
+                logger.info(f"Дубль пропущен: {link}")
 
         current_index = (current_index + 1) % len(RSS_URLS)
         next_post_event.wait(posting_interval)
@@ -371,7 +374,7 @@ def get_help():
 /start - Привязать канал или проверить доступ
 /startposting - Начать постинг
 /stopposting - Остановить постинг
-/setinterval &lt;time&gt; - Установить интервал (34m, 1h, 2h 53m)
+/setinterval <time> - Установить интервал (34m, 1h, 2h 53m)
 /nextpost - Сбросить таймер и запостить
 /skiprss - Пропустить следующий RSS
 /editprompt - Изменить промпт для ИИ (отправь после команды)
@@ -380,8 +383,8 @@ def get_help():
 /info - Показать статус бота
 /feedcache - Показать кэш новостей
 /feedcacheclear - Очистить кэш
-/addadmin &lt;username&gt; - Добавить админа
-/removeadmin &lt;username&gt; - Удалить админа
+/addadmin <username> - Добавить админа
+/removeadmin <username> - Удалить админа
 /help - Это сообщение
 """
     logger.info(f"Текст помощи перед отправкой: {help_text}")
