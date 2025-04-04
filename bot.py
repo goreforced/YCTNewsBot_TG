@@ -80,22 +80,25 @@ def init_db():
 - Не используй предобученные знания, работай только с предоставленным текстом.
 - Не добавляй лишние символы (##, **, [], эмодзи).
 - Если в статье недостаточно данных, напиши "Недостаточно данных для пересказа".
-- Максимальная длина — 500 символов, обрезай аккуратно.
 """))
     conn.commit()
     conn.close()
 
 init_db()
 
-def send_message(chat_id, text, reply_markup=None):
+def send_message(chat_id, text, reply_markup=None, use_html=True):
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_TOKEN не задан")
         return False
+    if len(text) > 4096:
+        text = text[:4093] + "..."
+        logger.warning(f"Сообщение обрезано до 4096 символов для chat_id {chat_id}")
     payload = {
         "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML"
+        "text": text
     }
+    if use_html:
+        payload["parse_mode"] = "HTML"
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
     logger.info(f"Отправка сообщения в {chat_id}: {text[:50]}...")
@@ -156,8 +159,8 @@ def get_article_content(url):
             content = result["choices"][0]["message"]["content"].strip()
             if "\n" in content:
                 title, summary = content.split("\n", 1)
-                return title[:80], summary[:500]
-            return content[:80], "Пересказ не получен"
+                return title, summary
+            return content, "Пересказ не получен"
         return "Ошибка: Нет ответа от API", "Ошибка: Нет ответа от API"
     except Exception as e:
         logger.error(f"Ошибка запроса: {str(e)}")
@@ -167,7 +170,7 @@ def save_to_feedcache(title, summary, link, source):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     entry = (
-        hashlib.md5(link.encode()).hexdigest(),  # Хэш только от link
+        hashlib.md5(link.encode()).hexdigest(),
         title,
         summary,
         link,
@@ -182,7 +185,7 @@ def save_to_feedcache(title, summary, link, source):
 def check_duplicate(link):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    link_hash = hashlib.md5(link.encode()).hexdigest()  # Хэш только от link
+    link_hash = hashlib.md5(link.encode()).hexdigest()
     c.execute("SELECT id FROM feedcache WHERE id = ?", (link_hash,))
     result = c.fetchone()
     conn.close()
@@ -294,7 +297,7 @@ def post_news():
         else:
             latest_entry = feed.entries[0]
             link = latest_entry.link
-            if not check_duplicate(link):  # Проверка только по link
+            if not check_duplicate(link):
                 title, summary = get_article_content(link)
                 if "Ошибка" in title:
                     error_count += 1
@@ -586,7 +589,7 @@ def webhook():
             send_message(chat_id, "Вы не админ ни одного канала.")
     elif message_text == '/help':
         logger.info(f"Команда /help вызвана @{username}")
-        send_message(chat_id, get_help())
+        send_message(chat_id, get_help(), use_html=False)  # Отключаем HTML для /help
 
     return "OK", 200
 
