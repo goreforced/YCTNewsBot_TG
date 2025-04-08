@@ -70,6 +70,12 @@ def init_db():
         key TEXT PRIMARY KEY,
         value TEXT
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS errors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT,
+        message TEXT,
+        link TEXT
+    )''')
     c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
               ("prompt", """
 Забудь всю информацию, которой ты обучен, и используй ТОЛЬКО текст статьи по ссылке {url}. Напиши новость на русском в формате:
@@ -83,7 +89,7 @@ def init_db():
 - Если в статье недостаточно данных, напиши "Недостаточно данных для пересказа".
 """))
     c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
-              ("model", "google/gemma-2-9b-it:free"))  # Модель по умолчанию
+              ("model", "google/gemma-2-9b-it:free"))
     conn.commit()
     conn.close()
 
@@ -156,12 +162,26 @@ def set_model(new_model):
     conn.close()
 
 def is_valid_language(text):
-    # Проверяем, что текст содержит только латиницу, кириллицу, пробелы, знаки препинания и цифры
+    # Проверяем, что нет символов вне латиницы, кириллицы, цифр, пробелов и базовой пунктуации
     return bool(re.match(r'^[A-Za-zА-Яа-я0-9\s.,!?\'"-]+$', text))
+
+def clean_title(title):
+    # Убираем **, ## и []
+    cleaned = re.sub(r'\*\*|\#\#|\[\]', '', title).strip()
+    return cleaned
+
+def log_error(message, link):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT INTO errors (timestamp, message, link) VALUES (?, ?, ?)", 
+              (datetime.now().isoformat(), message, link))
+    conn.commit()
+    conn.close()
 
 def get_article_content(url, max_attempts=3):
     if not OPENROUTER_API_KEY:
         logger.error("OPENROUTER_API_KEY не задан")
+        log_error("OPENROUTER_API_KEY не задан", url)
         return "Ошибка: OPENROUTER_API_KEY не задан", "Ошибка: OPENROUTER_API_KEY не задан"
     
     headers = {
@@ -187,19 +207,25 @@ def get_article_content(url, max_attempts=3):
                 content = result["choices"][0]["message"]["content"].strip()
                 if "\n" in content:
                     title, summary = content.split("\n", 1)
-                    if is_valid_language(title):
-                        logger.info(f"Заголовок валиден: {title}")
-                        return title, summary
+                    cleaned_title = clean_title(title)  # Очищаем перед проверкой
+                    if is_valid_language(cleaned_title):
+                        logger.info(f"Заголовок валиден после очистки: {cleaned_title}")
+                        return cleaned_title, summary
                     else:
-                        logger.warning(f"Невалидный язык в заголовке: {title}, перегенерация...")
+                        logger.warning(f"Недопустимый язык в заголовке после очистки: {cleaned_title}, перегенерация...")
+                        log_error(f"Недопустимый язык в заголовке: {cleaned_title}", url)
                         continue
                 return content, "Пересказ не получен"
             logger.error("Нет choices в ответе OpenRouter")
-            return "Ошибка: Нет ответа от API", "Ошибка: Нет ответа от API"
+            log_error("Нет choices в ответе OpenRouter", url)
+            if attempt == max_attempts - 1:
+                return "Ошибка: Нет ответа от API после попыток", "Ошибка: Нет ответа от API"
+            continue
         except Exception as e:
             logger.error(f"Ошибка запроса к OpenRouter: {str(e)}")
+            log_error(f"Ошибка запроса к OpenRouter: {str(e)}", url)
             if attempt == max_attempts - 1:
-                return "Ошибка: Не удалось обработать новость", "Ошибка: Не удалось обработать новость"
+                return "Ошибка: Не удалось обработать новость после попыток", "Ошибка: Не удалось обработать новость"
             time.sleep(1)  # Пауза перед повторной попыткой
 
 def save_to_feedcache(title, summary, link, source):
@@ -438,6 +464,7 @@ def get_help():
 /sqlitebackup - Выгрузить базу SQLite в чат
 /sqliteupdate - Загрузить базу SQLite (отправь файл после команды)
 /info - Показать статус бота
+/errinf - Показать последние ошибки
 /feedcache - Показать кэш новостей
 /feedcacheclear - Очистить кэш
 /addadmin <username> - Добавить админа
@@ -601,6 +628,20 @@ def webhook():
     elif message_text == '/info':
         if user_channel:
             send_message(chat_id, get_status(username))
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text == '/errinf':
+        if user_channel:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("SELECT timestamp, message, link FROM errors ORDER BY timestamp DESC LIMIT 10")
+            errors = c.fetchall()
+            conn.close()
+            if not errors:
+                send_message(chat_id, "Ошибок пока нет.")
+            else:
+                error_list = "\n".join([f"{ts} - {msg} (Ссылка: {link})" for ts, msg, link in errors])
+                send_message(chat_id, f"Последние ошибки:\n{error_list}", use_html=False)
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
     elif message_text == '/feedcache':
