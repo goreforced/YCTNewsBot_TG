@@ -93,6 +93,7 @@ def init_db():
     conn.commit()
     conn.close()
 
+# Вызываем при старте
 init_db()
 
 def send_message(chat_id, text, reply_markup=None, use_html=True):
@@ -162,8 +163,8 @@ def set_model(new_model):
     conn.close()
 
 def is_valid_language(text):
-    # Проверяем, что нет символов вне латиницы, кириллицы, цифр, пробелов и базовой пунктуации
-    return bool(re.match(r'^[A-Za-zА-Яа-я0-9\s.,!?\'"-]+$', text))
+    # Разрешены латиница, кириллица, цифры, пробелы, базовая пунктуация + : . ;
+    return bool(re.match(r'^[A-Za-zА-Яа-я0-9\s.,!?\'"-:;]+$', text))
 
 def clean_title(title):
     # Убираем **, ## и []
