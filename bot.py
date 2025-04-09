@@ -163,11 +163,9 @@ def set_model(new_model):
     conn.close()
 
 def is_valid_language(text):
-    # Разрешены латиница, кириллица, цифры, пробелы, базовая пунктуация + : . ;
     return bool(re.match(r'^[A-Za-zА-Яа-я0-9\s.,!?\'"-:;]+$', text))
 
 def clean_title(title):
-    # Убираем **, ## и []
     cleaned = re.sub(r'\*\*|\#\#|\[\]', '', title).strip()
     return cleaned
 
@@ -184,7 +182,7 @@ def get_article_content(url, max_attempts=3):
         logger.error("OPENROUTER_API_KEY не задан")
         log_error("OPENROUTER_API_KEY не задан", url)
         return "Ошибка: OPENROUTER_API_KEY не задан", "Ошибка: OPENROUTER_API_KEY не задан"
-    
+
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -197,7 +195,7 @@ def get_article_content(url, max_attempts=3):
         "model": model,
         "messages": [{"role": "user", "content": prompt}]
     }
-    
+
     for attempt in range(max_attempts):
         logger.info(f"Запрос к OpenRouter для {url}, попытка {attempt + 1}, модель: {model}")
         try:
@@ -208,7 +206,7 @@ def get_article_content(url, max_attempts=3):
                 content = result["choices"][0]["message"]["content"].strip()
                 if "\n" in content:
                     title, summary = content.split("\n", 1)
-                    cleaned_title = clean_title(title)  # Очищаем перед проверкой
+                    cleaned_title = clean_title(title)
                     if is_valid_language(cleaned_title):
                         logger.info(f"Заголовок валиден после очистки: {cleaned_title}")
                         return cleaned_title, summary
@@ -227,7 +225,7 @@ def get_article_content(url, max_attempts=3):
             log_error(f"Ошибка запроса к OpenRouter: {str(e)}", url)
             if attempt == max_attempts - 1:
                 return "Ошибка: Не удалось обработать новость после попыток", "Ошибка: Не удалось обработать новость"
-            time.sleep(1)  # Пауза перед повторной попыткой
+            time.sleep(1)
 
 def save_to_feedcache(title, summary, link, source):
     conn = sqlite3.connect(DB_FILE)
@@ -372,18 +370,132 @@ def post_news():
                     error_count += 1
                     logger.error(f"Ошибка обработки новости: {title}")
                 else:
-                    message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}\n\n<i>Пост сгенерирован ИИ</i>"
-                    logger.info(f"Сформировано сообщение: {message[:50]}...")
+                    message = f"<b>{title}</b>\n{summary}\n\n<a href='{link}'>Источник</a>\n<i>Пост сгенерирован ИИ</i>"
+                    media_url = latest_entry.get("media_content", [{}])[0].get("url") or latest_entry.get("enclosure", {}).get("url")
+
                     for (channel_id,) in channels:
                         if can_post_to_channel(channel_id):
-                            if send_message(channel_id, message, use_html=True):
-                                save_to_feedcache(title, summary, link, rss_url.split('/')[2])
-                                post_count += 1
-                                last_post_time = time.time()
-                                logger.info(f"Новость успешно запощена в {channel_id}")
+                            if media_url:
+                                # Проверяем тип медиа
+                                if media_url.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
+                                    # Отправляем фото
+                                    payload = {
+                                        "chat_id": channel_id,
+                                        "photo": media_url,
+                                        "caption": message,
+                                        "parse_mode": "HTML"
+                                    }
+                                    logger.info(f"Попытка отправить фото для {link}: {media_url}")
+                                    response = requests.post(f"{TELEGRAM_URL}sendPhoto", json=payload)
+                                    if response.status_code == 200:
+                                        save_to_feedcache(title, summary, link, rss_url.split('/')[2])
+                                        post_count += 1
+                                        last_post_time = time.time()
+                                        logger.info(f"Новость с фото успешно запощена в {channel_id}")
+                                    else:
+                                        logger.error(f"Ошибка отправки фото: {response.text}")
+                                        # Fallback на текст
+                                        payload = {
+                                            "chat_id": channel_id,
+                                            "text": message,
+                                            "parse_mode": "HTML",
+                                            "disable_web_page_preview": True
+                                        }
+                                        response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
+                                        if response.status_code == 200:
+                                            save_to_feedcache(title, summary, link, rss_url.split('/')[2])
+                                            post_count += 1
+                                            last_post_time = time.time()
+                                            logger.info(f"Новость без фото запощена в {channel_id} (fallback)")
+                                        else:
+                                            error_count += 1
+                                            logger.error(f"Не удалось запостить в {channel_id}: {response.text}")
+                                elif media_url.lower().endswith(('.mp4', '.webm')):
+                                    # Отправляем видео
+                                    payload = {
+                                        "chat_id": channel_id,
+                                        "video": media_url,
+                                        "caption": message,
+                                        "parse_mode": "HTML"
+                                    }
+                                    logger.info(f"Попытка отправить видео для {link}: {media_url}")
+                                    response = requests.post(f"{TELEGRAM_URL}sendVideo", json=payload)
+                                    if response.status_code == 200:
+                                        save_to_feedcache(title, summary, link, rss_url.split('/')[2])
+                                        post_count += 1
+                                        last_post_time = time.time()
+                                        logger.info(f"Новость с видео успешно запощена в {channel_id}")
+                                    else:
+                                        logger.error(f"Ошибка отправки видео: {response.text}")
+                                        # Fallback на текст
+                                        payload = {
+                                            "chat_id": channel_id,
+                                            "text": message,
+                                            "parse_mode": "HTML",
+                                            "disable_web_page_preview": True
+                                        }
+                                        response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
+                                        if response.status_code == 200:
+                                            save_to_feedcache(title, summary, link, rss_url.split('/')[2])
+                                            post_count += 1
+                                            last_post_time = time.time()
+                                            logger.info(f"Новость без видео запощена в {channel_id} (fallback)")
+                                        else:
+                                            error_count += 1
+                                            logger.error(f"Не удалось запостить в {channel_id}: {response.text}")
+                                elif media_url.lower().endswith(('.mp3', '.wav')):
+                                    # Пропускаем аудио, отправляем только текст
+                                    logger.info(f"Аудио пропущено: {media_url}")
+                                    payload = {
+                                        "chat_id": channel_id,
+                                        "text": message,
+                                        "parse_mode": "HTML",
+                                        "disable_web_page_preview": True
+                                    }
+                                    response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
+                                    if response.status_code == 200:
+                                        save_to_feedcache(title, summary, link, rss_url.split('/')[2])
+                                        post_count += 1
+                                        last_post_time = time.time()
+                                        logger.info(f"Новость без медиа запощена в {channel_id}")
+                                    else:
+                                        error_count += 1
+                                        logger.error(f"Не удалось запостить в {channel_id}: {response.text}")
+                                else:
+                                    # Неизвестный тип медиа, отправляем только текст
+                                    logger.info(f"Неизвестный тип медиа пропущен: {media_url}")
+                                    payload = {
+                                        "chat_id": channel_id,
+                                        "text": message,
+                                        "parse_mode": "HTML",
+                                        "disable_web_page_preview": True
+                                    }
+                                    response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
+                                    if response.status_code == 200:
+                                        save_to_feedcache(title, summary, link, rss_url.split('/')[2])
+                                        post_count += 1
+                                        last_post_time = time.time()
+                                        logger.info(f"Новость без медиа запощена в {channel_id}")
+                                    else:
+                                        error_count += 1
+                                        logger.error(f"Не удалось запостить в {channel_id}: {response.text}")
                             else:
-                                error_count += 1
-                                logger.error(f"Не удалось запостить в {channel_id}")
+                                # Если медиа нет, отправляем только текст
+                                payload = {
+                                    "chat_id": channel_id,
+                                    "text": message,
+                                    "parse_mode": "HTML",
+                                    "disable_web_page_preview": True
+                                }
+                                response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
+                                if response.status_code == 200:
+                                    save_to_feedcache(title, summary, link, rss_url.split('/')[2])
+                                    post_count += 1
+                                    last_post_time = time.time()
+                                    logger.info(f"Новость без медиа запощена в {channel_id}")
+                                else:
+                                    error_count += 1
+                                    logger.error(f"Не удалось запостить в {channel_id}: {response.text}")
                         else:
                             error_count += 1
                             logger.error(f"Нет прав для постинга в {channel_id}")
@@ -485,7 +597,7 @@ def webhook():
     logger.info("Получен запрос на /webhook")
     update = request.get_json()
     logger.info(f"Данные запроса: {json.dumps(update, ensure_ascii=False)}")
-    
+
     if not update or 'message' not in update or 'message_id' not in update['message']:
         logger.error("Некорректный запрос")
         return "OK", 200
