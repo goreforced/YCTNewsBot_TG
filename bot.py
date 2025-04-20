@@ -90,6 +90,8 @@ def init_db():
 """))
     c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
               ("model", "google/gemma-2-9b-it:free"))
+    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
+              ("error_notifications", "off"))
     conn.commit()
     conn.close()
 
@@ -162,9 +164,24 @@ def set_model(new_model):
     conn.commit()
     conn.close()
 
+def get_error_notifications():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT value FROM config WHERE key = 'error_notifications'")
+    result = c.fetchone()
+    conn.close()
+    return result[0] == "on" if result else False
+
+def set_error_notifications(state):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('error_notifications', ?)", (state,))
+    conn.commit()
+    conn.close()
+
 def is_valid_language(text):
-    # Разрешены латиница, кириллица, цифры, пробелы, базовая пунктуация + : . ;
-    return bool(re.match(r'^[A-Za-zА-Яа-я0-9\s.,!?\'"-:;]+$', text))
+    # Разрешены латиница, кириллица, цифры, пробелы, базовая пунктуация + : . ; - –
+    return bool(re.match(r'^[A-Za-zА-Яа-я0-9\s.,!?\'"-:;–]+$', text))
 
 def clean_title(title):
     # Убираем **, ## и []
@@ -177,6 +194,11 @@ def log_error(message, link):
     c.execute("INSERT INTO errors (timestamp, message, link) VALUES (?, ?, ?)", 
               (datetime.now().isoformat(), message, link))
     conn.commit()
+    if get_error_notifications():
+        c.execute("SELECT channel_id FROM channels")
+        channels = c.fetchall()
+        for (channel_id,) in channels:
+            send_message(channel_id, f"Ошибка: {message}\nСсылка: {link}", use_html=False)
     conn.close()
 
 def get_article_content(url, max_attempts=3):
@@ -208,7 +230,7 @@ def get_article_content(url, max_attempts=3):
                 content = result["choices"][0]["message"]["content"].strip()
                 if "\n" in content:
                     title, summary = content.split("\n", 1)
-                    cleaned_title = clean_title(title)  # Очищаем перед проверкой
+                    cleaned_title = clean_title(title)
                     if is_valid_language(cleaned_title):
                         logger.info(f"Заголовок валиден после очистки: {cleaned_title}")
                         return cleaned_title, summary
@@ -219,15 +241,13 @@ def get_article_content(url, max_attempts=3):
                 return content, "Пересказ не получен"
             logger.error("Нет choices в ответе OpenRouter")
             log_error("Нет choices в ответе OpenRouter", url)
-            if attempt == max_attempts - 1:
-                return "Ошибка: Нет ответа от API после попыток", "Ошибка: Нет ответа от API"
-            continue
         except Exception as e:
             logger.error(f"Ошибка запроса к OpenRouter: {str(e)}")
             log_error(f"Ошибка запроса к OpenRouter: {str(e)}", url)
             if attempt == max_attempts - 1:
                 return "Ошибка: Не удалось обработать новость после попыток", "Ошибка: Не удалось обработать новость"
-            time.sleep(1)  # Пауза перед повторной попыткой
+            time.sleep(1)
+    return "Ошибка: Не удалось обработать новость после попыток", "Ошибка: Не удалось обработать новость"
 
 def save_to_feedcache(title, summary, link, source):
     conn = sqlite3.connect(DB_FILE)
@@ -371,22 +391,22 @@ def post_news():
                 if "Ошибка" in title:
                     error_count += 1
                     logger.error(f"Ошибка обработки новости: {title}")
-                else:
-                    message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}\n\n<i>Пост сгенерирован ИИ</i>"
-                    logger.info(f"Сформировано сообщение: {message[:50]}...")
-                    for (channel_id,) in channels:
-                        if can_post_to_channel(channel_id):
-                            if send_message(channel_id, message, use_html=True):
-                                save_to_feedcache(title, summary, link, rss_url.split('/')[2])
-                                post_count += 1
-                                last_post_time = time.time()
-                                logger.info(f"Новость успешно запощена в {channel_id}")
-                            else:
-                                error_count += 1
-                                logger.error(f"Не удалось запостить в {channel_id}")
+                    continue  # Пропускаем новость и продолжаем цикл
+                message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}\n\n<i>Пост сгенерирован ИИ</i>"
+                logger.info(f"Сформировано сообщение: {message[:50]}...")
+                for (channel_id,) in channels:
+                    if can_post_to_channel(channel_id):
+                        if send_message(channel_id, message, use_html=True):
+                            save_to_feedcache(title, summary, link, rss_url.split('/')[2])
+                            post_count += 1
+                            last_post_time = time.time()
+                            logger.info(f"Новость успешно запощена в {channel_id}")
                         else:
                             error_count += 1
-                            logger.error(f"Нет прав для постинга в {channel_id}")
+                            logger.error(f"Не удалось запостить в {channel_id}")
+                    else:
+                        error_count += 1
+                        logger.error(f"Нет прав для постинга в {channel_id}")
             else:
                 duplicate_count += 1
                 logger.info(f"Дубль пропущен: {link}, общее число дублей: {duplicate_count}")
@@ -406,6 +426,8 @@ def start_posting_thread():
         posting_thread = threading.Thread(target=post_news)
         posting_thread.start()
         logger.info("Постинг запущен")
+    else:
+        logger.info("Постинг уже активен")
 
 def stop_posting_thread():
     global posting_active, posting_thread
@@ -466,6 +488,7 @@ def get_help():
 /sqliteupdate - Загрузить базу SQLite (отправь файл после команды)
 /info - Показать статус бота
 /errinf - Показать последние ошибки
+/errnotification <on/off> - Включить/выключить уведомления об ошибках
 /feedcache - Показать кэш новостей
 /feedcacheclear - Очистить кэш
 /addadmin <username> - Добавить админа
@@ -643,6 +666,19 @@ def webhook():
             else:
                 error_list = "\n".join([f"{ts} - {msg} (Ссылка: {link})" for ts, msg, link in errors])
                 send_message(chat_id, f"Последние ошибки:\n{error_list}", use_html=False)
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text.startswith('/errnotification'):
+        if user_channel:
+            try:
+                state = message_text.split()[1].lower()
+                if state in ['on', 'off']:
+                    set_error_notifications(state)
+                    send_message(chat_id, f"Уведомления об ошибках: {state}")
+                else:
+                    send_message(chat_id, "Используйте: /errnotification on или /errnotification off")
+            except IndexError:
+                send_message(chat_id, "Укажите состояние: /errnotification on или /errnotification off")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
     elif message_text == '/feedcache':
