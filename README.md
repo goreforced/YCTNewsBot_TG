@@ -28,7 +28,7 @@ AutoNews — это Telegram-бот, который автоматически �
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone https://github.com/<your-username>/AutoNews.git
+   git clone https://github.com/goreforced/YCTNewsBot_TG
    cd AutoNews
    ```
 
