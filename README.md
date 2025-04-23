@@ -29,7 +29,7 @@ AutoNews — это Telegram-бот, который автоматически �
 1. Клонируйте репозиторий:
    ```bash
    git clone https://github.com/goreforced/YCTNewsBot_TG.git
-   cd AutoNews
+   cd YCTNewsBot_TG
    ```
 
 2. Установите зависимости:
@@ -150,7 +150,7 @@ AutoNews is a Telegram bot that automatically collects news from RSS feeds, gene
 1. Clone the repository:
    ```bash
    git clone https://github.com/goreforced/YCTNewsBot_TG.git
-   cd AutoNews
+   cd YCTNewsBot_TG
    ```
 
 2. Install dependencies:
