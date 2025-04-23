@@ -45,7 +45,7 @@ AutoNews — это Telegram-бот, который автоматически �
 
 4. Запустите приложение:
    ```bash
-   python app.py
+   python bot.py
    ```
 
 5. Настройте вебхук для Telegram:
@@ -166,7 +166,7 @@ AutoNews is a Telegram bot that automatically collects news from RSS feeds, gene
 
 4. Run the application:
    ```bash
-   python app.py
+   python bot.py
    ```
 
 5. Set up a Telegram webhook:
