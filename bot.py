@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 import threading
 import time
 import re
+from openai import OpenAI
 
 app = Flask(__name__)
 
@@ -17,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Changed from OPENROUTER_API_KEY
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/" if TELEGRAM_TOKEN else None
 DB_FILE = "feedcache.db"
 
@@ -89,13 +90,13 @@ def init_db():
 - Если в статье недостаточно данных, напиши "Недостаточно данных для пересказа".
 """))
     c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
-              ("model", "google/gemma-2-9b-it:free"))
+              ("model", "gpt-4o-mini"))  # Default OpenAI model
     c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
               ("error_notifications", "off"))
     conn.commit()
     conn.close()
 
-# Вызываем при старте
+# Initialize database
 init_db()
 
 def send_message(chat_id, text, reply_markup=None, use_html=True):
@@ -155,7 +156,7 @@ def get_model():
     c.execute("SELECT value FROM config WHERE key = 'model'")
     result = c.fetchone()
     conn.close()
-    return result[0] if result else "google/gemma-2-9b-it:free"
+    return result[0] if result else "gpt-4o-mini"
 
 def set_model(new_model):
     conn = sqlite3.connect(DB_FILE)
@@ -180,11 +181,9 @@ def set_error_notifications(state):
     conn.close()
 
 def is_valid_language(text):
-    # Разрешены латиница, кириллица, цифры, пробелы, базовая пунктуация + : . ; - –
     return bool(re.match(r'^[A-Za-zА-Яа-я0-9\s.,!?\'"-:;–]+$', text))
 
 def clean_title(title):
-    # Убираем **, ## и []
     cleaned = re.sub(r'\*\*|\#\#|\[\]', '', title).strip()
     return cleaned
 
@@ -202,48 +201,39 @@ def log_error(message, link):
     conn.close()
 
 def get_article_content(url, max_attempts=3):
-    if not OPENROUTER_API_KEY:
-        logger.error("OPENROUTER_API_KEY не задан")
-        log_error("OPENROUTER_API_KEY не задан", url)
-        return "Ошибка: OPENROUTER_API_KEY не задан", "Ошибка: OPENROUTER_API_KEY не задан"
+    if not OPENAI_API_KEY:
+        logger.error("OPENAI_API_KEY не задан")
+        log_error("OPENAI_API_KEY не задан", url)
+        return "Ошибка: OPENAI_API_KEY не задан", "Ошибка: OPENAI_API_KEY не задан"
 
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://t.me/Tech_Chronicle",
-        "X-Title": "TChNewsBot"
-    }
+    client = OpenAI(api_key=OPENAI_API_KEY)
     prompt = get_prompt().format(url=url)
     model = get_model()
-    data = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}]
-    }
 
     for attempt in range(max_attempts):
-        logger.info(f"Запрос к OpenRouter для {url}, попытка {attempt + 1}, модель: {model}")
+        logger.info(f"Запрос к OpenAI для {url}, попытка {attempt + 1}, модель: {model}")
         try:
-            response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, data=json.dumps(data), timeout=15)
-            response.raise_for_status()
-            result = response.json()
-            if "choices" in result and result["choices"]:
-                content = result["choices"][0]["message"]["content"].strip()
-                if "\n" in content:
-                    title, summary = content.split("\n", 1)
-                    cleaned_title = clean_title(title)
-                    if is_valid_language(cleaned_title):
-                        logger.info(f"Заголовок валиден после очистки: {cleaned_title}")
-                        return cleaned_title, summary
-                    else:
-                        logger.warning(f"Недопустимый язык в заголовке после очистки: {cleaned_title}, перегенерация...")
-                        log_error(f"Недопустимый язык в заголовке: {cleaned_title}", url)
-                        continue
-                return content, "Пересказ не получен"
-            logger.error("Нет choices в ответе OpenRouter")
-            log_error("Нет choices в ответе OpenRouter", url)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=500
+            )
+            content = response.choices[0].message.content.strip()
+            if "\n" in content:
+                title, summary = content.split("\n", 1)
+                cleaned_title = clean_title(title)
+                if is_valid_language(cleaned_title):
+                    logger.info(f"Заголовок валиден после очистки: {cleaned_title}")
+                    return cleaned_title, summary
+                else:
+                    logger.warning(f"Недопустимый язык в заголовке после очистки: {cleaned_title}, перегенерация...")
+                    log_error(f"Недопустимый язык в заголовке: {cleaned_title}", url)
+                    continue
+            return content, "Пересказ не получен"
         except Exception as e:
-            logger.error(f"Ошибка запроса к OpenRouter: {str(e)}")
-            log_error(f"Ошибка запроса к OpenRouter: {str(e)}", url)
+            logger.error(f"Ошибка запроса к OpenAI: {str(e)}")
+            log_error(f"Ошибка запроса к OpenAI: {str(e)}", url)
             if attempt == max_attempts - 1:
                 return "Ошибка: Не удалось обработать новость после попыток", "Ошибка: Не удалось обработать новость"
             time.sleep(1)
@@ -391,7 +381,7 @@ def post_news():
                 if "Ошибка" in title:
                     error_count += 1
                     logger.error(f"Ошибка обработки новости: {title}")
-                    continue  # Пропускаем новость и продолжаем цикл
+                    continue
                 message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}\n\n<i>Пост сгенерирован ИИ</i>"
                 logger.info(f"Сформировано сообщение: {message[:50]}...")
                 for (channel_id,) in channels:
@@ -482,7 +472,7 @@ def get_help():
 /setinterval <time> - Установить интервал (34m, 1h, 2h 53m)
 /nextpost - Сбросить таймер и запостить
 /skiprss - Пропустить следующий RSS
-/changellm <model> - Сменить модель LLM (например, google/gemma-2-9b-it:free)
+/changellm <model> - Сменить модель LLM (например, gpt-4o-mini)
 /editprompt - Изменить промпт для ИИ (отправь после команды)
 /sqlitebackup - Выгрузить базу SQLite в чат
 /sqliteupdate - Загрузить базу SQLite (отправь файл после команды)
@@ -610,7 +600,7 @@ def webhook():
     elif message_text.startswith('/changellm'):
         if user_channel:
             if len(message_text.split()) == 1:
-                send_message(chat_id, "Укажите модель, например: /changellm xai/xai-grok\nДоступные модели: см. https://openrouter.ai/models")
+                send_message(chat_id, "Укажите модель, например: /changellm gpt-4o-mini\nДоступные модели: см. https://platform.openai.com/docs/models")
             else:
                 new_model = message_text.split()[1]
                 set_model(new_model)
