@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Changed from OPENROUTER_API_KEY
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/" if TELEGRAM_TOKEN else None
 DB_FILE = "feedcache.db"
 
@@ -45,6 +45,7 @@ duplicate_count = 0
 last_post_time = None
 posting_interval = 3600
 next_post_event = threading.Event()
+last_llm_response = None  # Глобальная переменная для хранения последнего ответа LLM
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -79,18 +80,20 @@ def init_db():
     )''')
     c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
               ("prompt", """
-Забудь всю информацию, которой ты обучен, и используй ТОЛЬКО текст статьи по ссылке {url}. Напиши новость на русском в формате:
+Забудь всю информацию, которой ты обучен, и используй ТОЛЬКО текст статьи по ссылке {url}. Напиши новость на русском в следующем формате:
+
 Заголовок в стиле новостного канала
+<один перенос строки>
 Основная суть новости в 1-2 предложениях, основанных исключительно на статье.
 
 Требования:
-- Не добавляй никаких данных, которых нет в статье, включая даты, цифры или статусы лиц.
-- Не используй предобученные знания, работай только с предоставленным текстом.
-- Не добавляй лишние символы (##, **, [], эмодзи).
-- Если в статье недостаточно данных, напиши "Недостаточно данных для пересказа".
+- Обязательно разделяй заголовок и пересказ ровно одним переносом строки (\n).
+- Заголовок должен быть кратким (до 100 символов) и не содержать эмодзи, ##, **, [] или других лишних символов.
+- Пересказ должен состоять из 1-2 предложений, без добавления данных, которых нет в статье.
+- Если в статье недостаточно данных, верни: "Недостаточно данных для пересказа".
 """))
     c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
-              ("model", "gpt-4o-mini"))  # Default OpenAI model
+              ("model", "gpt-4o-mini"))
     c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
               ("error_notifications", "off"))
     conn.commit()
@@ -181,7 +184,7 @@ def set_error_notifications(state):
     conn.close()
 
 def is_valid_language(text):
-    return bool(re.match(r'^[A-Za-zА-Яа-я0-9\s.,!?\'"-:;–]+$', text))
+    return bool(re.match(r'^[A-Za-zА-Яа-я0-9\s.,!?\'"-:;–/%$]+$', text))
 
 def clean_title(title):
     cleaned = re.sub(r'\*\*|\#\#|\[\]', '', title).strip()
@@ -201,6 +204,7 @@ def log_error(message, link):
     conn.close()
 
 def get_article_content(url, max_attempts=3):
+    global last_llm_response
     if not OPENAI_API_KEY:
         logger.error("OPENAI_API_KEY не задан")
         log_error("OPENAI_API_KEY не задан", url)
@@ -220,17 +224,42 @@ def get_article_content(url, max_attempts=3):
                 max_tokens=500
             )
             content = response.choices[0].message.content.strip()
+            logger.info(f"Сырой ответ LLM: {content}")
+
+            # Сохраняем сырой ответ в глобальную переменную
+            last_llm_response = {
+                "response": content,
+                "link": url,
+                "timestamp": datetime.now().isoformat()
+            }
+
+            # Пытаемся разделить заголовок и пересказ
+            title, summary = None, None
             if "\n" in content:
                 title, summary = content.split("\n", 1)
-                cleaned_title = clean_title(title)
-                if is_valid_language(cleaned_title):
-                    logger.info(f"Заголовок валиден после очистки: {cleaned_title}")
-                    return cleaned_title, summary
+                title = title.strip()
+                summary = summary.strip()
+            else:
+                # Запасной механизм: разделяем по первому предложению
+                sentences = re.split(r'(?<=[.!?])\s+', content.strip())
+                if len(sentences) > 1:
+                    title = sentences[0]
+                    summary = " ".join(sentences[1:]).strip()
                 else:
-                    logger.warning(f"Недопустимый язык в заголовке после очистки: {cleaned_title}, перегенерация...")
-                    log_error(f"Недопустимый язык в заголовке: {cleaned_title}", url)
-                    continue
-            return content, "Пересказ не получен"
+                    title = content
+                    summary = "Пересказ не получен"
+
+            cleaned_title = clean_title(title)
+            if len(cleaned_title) > 100:
+                cleaned_title = cleaned_title[:97] + "..."
+                logger.warning(f"Заголовок укорочен: {cleaned_title}")
+            if is_valid_language(cleaned_title):
+                logger.info(f"Заголовок валиден после очистки: {cleaned_title}")
+                return cleaned_title, summary
+            else:
+                logger.warning(f"Недопустимый язык в заголовке после очистки: {cleaned_title}, перегенерация...")
+                log_error(f"Недопустимый язык в заголовке: {cleaned_title}", url)
+                continue
         except Exception as e:
             logger.error(f"Ошибка запроса к OpenAI: {str(e)}")
             log_error(f"Ошибка запроса к OpenAI: {str(e)}", url)
@@ -302,7 +331,7 @@ def add_admin(channel_id, new_admin_username, requester_username):
     conn.close()
     return False
 
-def remove_admin(channel_id, admin_username, requester_username):
+def remove_admin(channel_id, admin_username348, requester_username):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT username FROM admins WHERE channel_id = ? AND username = ?", (channel_id, requester_username))
@@ -483,6 +512,7 @@ def get_help():
 /feedcacheclear - Очистить кэш
 /addadmin <username> - Добавить админа
 /removeadmin <username> - Удалить админа
+/debug - Показать последний сырой ответ LLM
 /help - Это сообщение
 """
     logger.info(f"Текст помощи перед отправкой: {help_text}")
@@ -717,6 +747,23 @@ def webhook():
                     send_message(chat_id, "Нельзя удалить создателя или вы не админ.")
             except IndexError:
                 send_message(chat_id, "Укажите username: /removeadmin @username")
+        else:
+            send_message(chat_id, "Вы не админ ни одного канала.")
+    elif message_text == '/debug':
+        if user_channel:
+            logger.info(f"Debug: Запрос от @{username} для показа последнего ответа LLM")
+            if last_llm_response:
+                response_text = (
+                    f"Последний сырой ответ LLM:\n\n"
+                    f"Ссылка: {last_llm_response['link']}\n"
+                    f"Время: {last_llm_response['timestamp']}\n\n"
+                    f"{last_llm_response['response']}"
+                )
+                send_message(chat_id, response_text, use_html=False)
+                logger.info(f"Debug: Последний ответ отправлен в {chat_id}: {last_llm_response['response'][:50]}...")
+            else:
+                send_message(chat_id, "Нет сохранённых ответов LLM. Попробуйте позже после обработки новости.")
+                logger.info("Debug: Нет сохранённых ответов LLM")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
     elif message_text == '/help':
